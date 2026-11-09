@@ -11,7 +11,8 @@
     "fetch": "tsx src/fetch.ts",
     "scene": "tsx src/scene.ts",
     "ground": "tsx src/ground.ts",
-    "publish": "tsx src/publish.ts"
+    "publish": "tsx src/publish.ts",
+    "og": "tsx src/og.ts"
   },
   "dependencies": {
     "playwright-core": "^1.65.0",

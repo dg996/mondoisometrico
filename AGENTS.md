@@ -108,6 +108,7 @@ npm run render -- <area> -j 2
 npm run paint -- <area> --center <lat>,<lon>  # slow (Codex); paint the test patch first and review it
 npm run export -- <all areas of the region>   # changed tiles into data/web (cache)
 npm run dev                                    # check the cache over production (http://localhost:<port>/)
+npm run og -- <city-slug>                      # social card web/public/og/<city-slug>.jpg from the tiles (commit it)
 npm run publish -- <region>                    # only with the user's go-ahead
 npm run deploy                                 # after every publish: pages bake in world.json's file names + preview
 ```
