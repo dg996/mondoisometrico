@@ -1,0 +1,20 @@
+# secrets: never commit (see .env.example)
+.env
+.env.*
+!.env.example
+
+# dependencies, builds, caches
+node_modules/
+web/dist/
+web/.astro/
+.wrangler/
+pipeline/page/dist/
+
+# pipeline data (raw downloads, renders, paintings, export cache, publish state): local only, map data lives on R2
+data/
+web/public/regions/
+
+
+*.log
+.DS_Store
+.idea/

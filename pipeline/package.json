@@ -1,0 +1,28 @@
+{
+  "name": "pipeline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "tsx src/render.ts",
+    "paint": "tsx src/paint.ts",
+    "export": "tsx src/export.ts",
+    "boundaries": "tsx src/boundaries.ts",
+    "typecheck": "tsc --noEmit",
+    "fetch": "tsx src/fetch.ts",
+    "scene": "tsx src/scene.ts",
+    "ground": "tsx src/ground.ts",
+    "publish": "tsx src/publish.ts"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0",
+    "sharp": "^0.35.5",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/three": "^0.187.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

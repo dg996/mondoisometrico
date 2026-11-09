@@ -1,0 +1,54 @@
+---
+/** The map page of one city: its region's flat map, opened centred on the city. */
+import { CITIES, REGIONS } from "../../../pipeline/src/places.ts";
+interface Props { city: string }
+const { city } = Astro.props;
+const c = CITIES[city], region = REGIONS[c.region];
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="theme-color" content="#0e0f12" />
+		<meta name="color-scheme" content="dark" />
+		<title>{c.title} · Isometric World</title>
+		<meta name="description" content={`${c.title} as a hand-painted isometric map, built from open data.`} />
+	</head>
+	<body data-city={city} data-region={c.region}>
+		<div id="map"></div>
+		<footer id="credits"></footer>
+		<!-- video mode (?video or V): big credit line above the area social apps cover with their UI -->
+		<div id="video-credit">{region.credits.map((line, i) => <>{i > 0 && <br />}{line}</>)}</div>
+
+		<style is:global>
+			html, body { margin: 0; height: 100%; background: #0e0f12; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden;
+				overscroll-behavior: none; -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
+			/* the map owns every gesture: no browser pan/pinch/double-tap zoom of the page, no long-press callout */
+			#map { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+			#map { position: fixed; inset: 0; background: #0e0f12; }
+			#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+			#credits { position: fixed; right: 0; bottom: 0; z-index: 10; font-size: 11px; line-height: 1.4; max-width: calc(100vw - 48px);
+				padding: 3px calc(8px + env(safe-area-inset-right, 0px)) calc(3px + env(safe-area-inset-bottom, 0px)) 8px;
+				background: rgba(255, 255, 255, 0.85); color: #333; border-top-left-radius: 6px; }
+			#credits a { color: #0b63c5; text-decoration: none; touch-action: manipulation; }
+			@media (pointer: coarse) { #credits { font-size: 12px; } #credits a { padding: 4px 0; } }
+			/* phones: a full-width bar with centred lines, clear of the notch corners and the home indicator */
+			@media (max-width: 640px) {
+				#credits { left: 0; max-width: none; border-radius: 0; text-align: center; text-wrap: balance;
+					padding: 5px calc(12px + env(safe-area-inset-right, 0px)) calc(5px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); }
+			}
+			#video-credit { display: none; position: fixed; z-index: 10; left: 50%; bottom: calc(9svh + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+				width: max-content; max-width: 92vw; padding: 0.35em 0.8em; border-radius: 0.5em; text-align: center;
+				font-size: clamp(10px, 1.55vmin, 15px); font-weight: 500; line-height: 1.4; color: rgba(255, 255, 255, 0.95);
+				background: rgba(10, 12, 16, 0.42); backdrop-filter: blur(4px); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); pointer-events: none; }
+			body.video #video-credit { display: block; }
+			body.video #credits { display: none; }
+		</style>
+
+		<script>
+			import '../scripts/map.ts';
+		</script>
+	</body>
+</html>

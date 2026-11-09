@@ -1,0 +1,16 @@
+// Cloudflare Workers static site: only the built pages (web/dist, a few hundred KB).
+// Map tiles and region data are served from R2 (pipeline/src/hosting.ts), not from here.
+// Deploy with `npm run deploy` (needs SITE_DOMAIN in .env).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "isometricworld",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./web/dist",
+    // unknown paths get 404.html, which sends capitalised city links (/Tel-Aviv-Yafo) to /tel-aviv-yafo
+    "not_found_handling": "404-page",
+    // /tel-aviv-yafo, not /tel-aviv-yafo/
+    "html_handling": "drop-trailing-slash"
+  }
+  // custom domain: SITE_DOMAIN in .env, passed by `npm run deploy` (pipeline/src/deploy.ts)
+}
