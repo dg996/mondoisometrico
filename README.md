@@ -78,7 +78,12 @@ data/web/regions/<region>/                  local cache = unpublished changes
         │ npm run publish -- <region>        upload (asks [y/N]), check, record state, empty the cache
         ▼
 R2 isometricworldtiles/regions/<region>/    production (dev and deployed builds read it)
+        │ npm run deploy                     rebuild the site: pages pick up the new file names and previews
 ```
+
+- **Deploy after every publish.** Each page is built with the published `world.json`: it preloads the
+  content-hashed files named there and shows the city preview from it. Without a redeploy the site still
+  works (the viewer reads the live `world.json`), but the preloads miss and the preview shows the old view.
 
 - Everything but `data/world.json` is cached for a year (`immutable`): tile URLs carry `?v=<content hash>`
   from `tiles-<layer>.<hash>.json`, and the data files and city previews have their hash in the name, so a

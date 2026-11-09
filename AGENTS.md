@@ -109,6 +109,7 @@ npm run paint -- <area> --center <lat>,<lon>  # slow (Codex); paint the test pat
 npm run export -- <all areas of the region>   # changed tiles into data/web (cache)
 npm run dev                                    # check the cache over production (http://localhost:<port>/)
 npm run publish -- <region>                    # only with the user's go-ahead
+npm run deploy                                 # after every publish: pages bake in world.json's file names + preview
 ```
 
 ### 6. Check
