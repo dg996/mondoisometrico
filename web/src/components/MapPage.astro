@@ -52,6 +52,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<meta property="og:site_name" content="Isometric World" />
 		<meta property="og:title" content={title} />
 		<meta property="og:description" content={description} />
+		<link rel="canonical" href={pageUrl} />
 		<meta property="og:url" content={pageUrl} />
 		<meta property="og:image" content={ogImage} />
 		<meta property="og:image:width" content="1200" />

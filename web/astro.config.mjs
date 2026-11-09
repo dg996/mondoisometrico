@@ -1,8 +1,9 @@
 // @ts-check
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import { HOSTING } from '../pipeline/src/hosting.ts';
+import { CITIES } from '../pipeline/src/places.ts';
 
 // hosting settings (TILES_ORIGIN, SITE_DOMAIN) live in the repo-root .env, never in git
 const ENV = fileURLToPath(new URL('../.env', import.meta.url));
@@ -41,8 +42,33 @@ const regionsOverlay = () => ({
 	},
 });
 
+/**
+ * Real 301s for capitalised city links (/Tel-Aviv-Yafo → /tel-aviv-yafo): writes dist/_redirects,
+ * which Cloudflare static assets apply before anything else. Matching is case-sensitive, so each city
+ * gets its Title-Case and title-based spellings; anything else still falls back to 404.html's script.
+ * (Not Astro's `redirects`: /Tel-Aviv-Yafo.html and /tel-aviv-yafo.html collide on macOS.)
+ */
+/** @returns {import('astro').AstroIntegration} */
+const cityRedirects = () => ({
+	name: 'city-redirects',
+	hooks: {
+		'astro:build:done': ({ dir }) => {
+			const lines = [];
+			for (const [slug, city] of Object.entries(CITIES)) {
+				const titleCase = slug.replace(/(^|-)([a-z])/g, (_, s, c) => s + c.toUpperCase());
+				const fromTitle = city.title.trim().replace(/\s+/g, '-');
+				for (const from of new Set([titleCase, fromTitle, slug.toUpperCase()])) {
+					if (from !== slug && /^[\w-]+$/.test(from)) lines.push(`/${from} /${slug} 301`);
+				}
+			}
+			writeFileSync(new URL('_redirects', dir), lines.join('\n') + '\n');
+		},
+	},
+});
+
 // https://astro.build/config
 export default defineConfig({
+	integrations: [cityRedirects()],
 	site: process.env.SITE_DOMAIN ? `https://${process.env.SITE_DOMAIN}` : undefined,
 	vite: {
 		// the browser has no process.env: bake the tile origin into the viewer
