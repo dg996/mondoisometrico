@@ -303,5 +303,7 @@ document.getElementById("credits")!.innerHTML = [
   `© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>`,
   `<a href="https://opendatasource.tel-aviv.gov.il/">Tel Aviv-Yafo Municipality</a>`,
   `<span title="© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA">Copernicus DEM</span>`,
+  // the method to recreate the derived database (ODbL) and the code
+  `<a href="https://github.com/krasun/isometricworld">Source</a>`,
 // each credit stays on one line; the separator rides at the end of the previous one so no line starts with "·"
 ].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ");
