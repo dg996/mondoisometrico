@@ -27,6 +27,7 @@ const city = CITIES[document.body.dataset.city!], REGION = document.body.dataset
 // map data lives on R2; the dev server serves /regions from the export cache, falling back to R2
 const BASE = `${import.meta.env.DEV ? "" : __TILES_ORIGIN__}/regions/${REGION}`;
 useRegion(REGION);
+// the page preloads these three (MapPage.astro), so they are on the way before this script runs
 const [world, borders, index] = await Promise.all([
   fetch(`${BASE}/data/world.json`).then((r) => r.json() as Promise<World>),
   fetch(`${BASE}/data/borders.json`).then((r) => r.json() as Promise<Border[]>),
@@ -105,18 +106,25 @@ let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
 let traffic: Traffic | null = null, cats: Cats | null = null, parrots: Parrots | null = null;
 const planes = world.airport ? new Planes(world.enu2px, world.airport) : null;
-fetch(`${BASE}/data/roads.json`).then((r) => (r.ok ? r.json() : [])).then((roads: Road[]) => {
-  if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
-  if (roads.length) cats = new Cats(roads, world.enu2px);
-  if (roads.length) { // parakeets roam over the streets' extent
-    const a = [Infinity, Infinity, -Infinity, -Infinity];
-    for (const r of roads) for (let i = 0; i < r.s.length; i += 4) {
-      a[0] = Math.min(a[0], r.s[i]); a[1] = Math.min(a[1], r.s[i + 1]); a[2] = Math.max(a[2], r.s[i]); a[3] = Math.max(a[3], r.s[i + 1]);
+// roads (~2 MB) feed only the animations: fetch them once the first view's tiles are in, not alongside them
+let roadsRequested = false;
+function loadRoads() {
+  if (roadsRequested) return;
+  roadsRequested = true;
+  fetch(`${BASE}/data/roads.json`).then((r) => (r.ok ? r.json() : [])).then((roads: Road[]) => {
+    if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
+    if (roads.length) cats = new Cats(roads, world.enu2px);
+    if (roads.length) { // parakeets roam over the streets' extent
+      const a = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const r of roads) for (let i = 0; i < r.s.length; i += 4) {
+        a[0] = Math.min(a[0], r.s[i]); a[1] = Math.min(a[1], r.s[i + 1]); a[2] = Math.max(a[2], r.s[i]); a[3] = Math.max(a[3], r.s[i + 1]);
+      }
+      parrots = new Parrots(world.enu2px, a);
     }
-    parrots = new Parrots(world.enu2px, a);
-  }
-  Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: parrots, __planes: planes });
-});
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: parrots, __planes: planes });
+  });
+}
+setTimeout(loadRoads, 6000); // slow connection: don't wait for every tile forever
 
 // biggest cities get their label first when labels would collide
 const ringArea = (r: Array<[number, number]>) => Math.abs(r.reduce((a, [y, x], i) => { const [y2, x2] = r[(i + 1) % r.length]; return a + x * y2 - x2 * y; }, 0) / 2);
@@ -213,6 +221,7 @@ if (new URLSearchParams(location.search).has("video")) document.body.classList.a
 //   #metro              the whole region with borders
 //   otherwise           the page's city (centre + width from places.ts)
 viewer.addOnceHandler("open", () => {
+  base().addOnceHandler("fully-loaded-change", loadRoads); // first view's tiles are drawn
   const [[y0, x0], [y1, x1]] = world.bounds;
   // never zoom out past the whole metro (all city borders) with a small margin
   let mx0 = x0, my0 = y0, mx1 = x1, my1 = y1;

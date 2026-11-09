@@ -1,9 +1,13 @@
 ---
 /** The map page of one city: its region's flat map, opened centred on the city. */
 import { CITIES, REGIONS } from "../../../pipeline/src/places.ts";
+import { HOSTING } from "../../../pipeline/src/hosting.ts";
 interface Props { city: string }
 const { city } = Astro.props;
 const c = CITIES[city], region = REGIONS[c.region];
+// map data comes from R2 (same-origin /regions in dev): start its downloads with the HTML, not after the script
+const tilesOrigin = import.meta.env.DEV ? "" : HOSTING.origin;
+const data = `${tilesOrigin}/regions/${c.region}/data`;
 ---
 
 <html lang="en">
@@ -14,6 +18,10 @@ const c = CITIES[city], region = REGIONS[c.region];
 		<meta name="theme-color" content="#0e0f12" />
 		<meta name="color-scheme" content="dark" />
 		<title>{c.title} · Isometric World</title>
+		{tilesOrigin && <link rel="preconnect" href={tilesOrigin} crossorigin="anonymous" />}
+		<link rel="preload" href={`${data}/world.json`} as="fetch" crossorigin="anonymous" />
+		<link rel="preload" href={`${data}/tiles.json`} as="fetch" crossorigin="anonymous" />
+		<link rel="preload" href={`${data}/borders.json`} as="fetch" crossorigin="anonymous" />
 		<meta name="description" content={`${c.title} as a hand-painted isometric map, built from open data.`} />
 	</head>
 	<body data-city={city} data-region={c.region}>
