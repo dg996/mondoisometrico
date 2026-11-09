@@ -87,11 +87,12 @@ const pv = world.previews?.[city];
 			#credits { position: fixed; right: 0; bottom: 0; z-index: 10; font-size: 11px; line-height: 1.4; max-width: calc(100vw - 48px);
 				padding: 3px calc(8px + env(safe-area-inset-right, 0px)) calc(3px + env(safe-area-inset-bottom, 0px)) 8px;
 				background: rgba(255, 255, 255, 0.85); color: #333; border-top-left-radius: 6px; }
+			#credits .credit { white-space: nowrap; }
 			#credits a { color: #0b63c5; text-decoration: none; touch-action: manipulation; }
 			@media (pointer: coarse) { #credits { font-size: 12px; } #credits a { padding: 4px 0; } }
-			/* phones: a full-width bar with centred lines, clear of the notch corners and the home indicator */
+			/* phones: a full-width bar with left-aligned lines, clear of the notch corners and the home indicator */
 			@media (max-width: 640px) {
-				#credits { left: 0; max-width: none; border-radius: 0; text-align: center; text-wrap: balance;
+				#credits { left: 0; max-width: none; border-radius: 0; text-align: left;
 					padding: 5px calc(12px + env(safe-area-inset-right, 0px)) calc(5px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); }
 			}
 			#video-credit { display: none; position: fixed; z-index: 10; left: 50%; bottom: calc(9svh + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
