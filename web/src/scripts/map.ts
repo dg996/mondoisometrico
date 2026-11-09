@@ -1,7 +1,8 @@
 import OpenSeadragon from "openseadragon";
-import { Traffic, type Road } from "./traffic.ts";
-import { Cats } from "./cats.ts";
-import { Planes, Parrots, type Airport } from "./sky.ts";
+// traffic, cats and sky are loaded after the first view (loadAnimations): not in the first script
+import type { Traffic } from "./traffic.ts";
+import type { Cats } from "./cats.ts";
+import type { Planes, Parrots, Airport } from "./sky.ts";
 import { CAMERA, llhToPixel, useRegion } from "../../../pipeline/src/camera.ts";
 import { CITIES } from "../../../pipeline/src/places.ts";
 declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by astro.config.mjs
@@ -19,7 +20,11 @@ interface World {
   areas: Array<{ id: string; title?: string }>;
   layers: { photo: number; art: number };
   attributions: string[];
+  /** content-hashed data files (absent in data exported before them: then the legacy names) */
+  files?: { "tiles-map"?: string; "tiles-photo"?: string; borders?: string; roads?: string };
+  format?: string;
 }
+type Index = Record<number, Record<string, string>>; // zoom → "x_y" → content hash
 interface Border { id: number; name: string; name_en?: string; rings: Array<Array<[number, number]>>; label?: [number, number] }
 
 // the page says which city it is; the city's region is one flat map under /regions/<region>/
@@ -27,18 +32,29 @@ const city = CITIES[document.body.dataset.city!], REGION = document.body.dataset
 // map data lives on R2; the dev server serves /regions from the export cache, falling back to R2
 const BASE = `${import.meta.env.DEV ? "" : __TILES_ORIGIN__}/regions/${REGION}`;
 useRegion(REGION);
-// the page preloads these three (MapPage.astro), so they are on the way before this script runs
-const [world, borders, index] = await Promise.all([
-  fetch(`${BASE}/data/world.json`).then((r) => r.json() as Promise<World>),
-  fetch(`${BASE}/data/borders.json`).then((r) => r.json() as Promise<Border[]>),
-  fetch(`${BASE}/data/tiles.json`).then((r) => r.json() as Promise<Record<string, Record<number, Record<string, string>>>>), // key → content hash
-]);
+const json = <T>(file: string) => fetch(`${BASE}/data/${file}`).then((r) => r.json() as Promise<T>);
+// the page preloads the data files named in world.json at build time (MapPage.astro); world.json is
+// the truth (a publish after the build renames them; those preloads then go unused)
+const worldReady = json<World>("world.json");
+// AVIF tiles (40% smaller); browsers without AVIF get the last WebP pyramid (data/tiles.json)
+const avifReady = new Promise<boolean>((done) => {
+  const img = new Image();
+  img.onload = () => done(img.width === 1);
+  img.onerror = () => done(false);
+  img.src = "data:image/avif;base64,AAAAHGZ0eXBhdmlmAAAAAG1pZjFhdmlmbWlhZgAAANZtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAACJpbG9jAAAAAERAAAEAAQAAAAAA+gABAAAAAAAAAB0AAAAjaWluZgAAAAAAAQAAABVpbmZlAgAAAAABAABhdjAxAAAAAA5waXRtAAAAAAABAAAAVmlwcnAAAAA4aXBjbwAAAAxhdjFDgSACAAAAABRpc3BlAAAAAAAAAAEAAAABAAAAEHBpeGkAAAAAAwgICAAAABZpcG1hAAAAAAAAAAEAAQOBAgMAAAAlbWRhdBIACgc4AAaQENBpMhAdgmLE4AAWAACQNY48fpPA";
+});
+const [world, avif] = await Promise.all([worldReady, avifReady]);
+const files = world.files ?? {}, modern = Boolean(avif && files["tiles-map"]);
+const EXT = modern ? world.format ?? "avif" : "webp";
+const legacy = modern ? null : json<Record<string, Index>>("tiles.json");
+/** a layer's tile index; the photo layer's only when it is first shown */
+const layerIndex = (layer: "map" | "photo") => (legacy ? legacy.then((all) => all[layer] ?? {}) : json<Index>(files[`tiles-${layer}`]!));
+const [borders, mapIndex] = await Promise.all([json<Border[]>(files.borders ?? "borders.json"), layerIndex("map")]);
 const [ox, oy] = world.origin;
 const TS = world.tile_size, NZ = world.native_zoom;
 
 /** Sparse pyramid in global tile indices, exposed to OpenSeadragon with a non-negative origin. */
-function tileSource(layer: string) {
-  const have = index[layer] ?? {};
+function tileSource(layer: string, have: Index) {
   const global = (level: number, x: number, y: number) => {
     const span = TS * 2 ** (NZ - level);
     return [x + Math.round(ox / span), y + Math.round(oy / span)];
@@ -48,7 +64,7 @@ function tileSource(layer: string) {
     minLevel: world.min_zoom, maxLevel: NZ,
     getTileUrl: (level: number, x: number, y: number) => {
       const [tx, ty] = global(level, x, y);
-      return `${BASE}/tiles/${layer}/${level}/${tx}/${ty}.webp?v=${have[level][`${tx}_${ty}`]}`; // immutable URL per content
+      return `${BASE}/tiles/${layer}/${level}/${tx}/${ty}.${EXT}?v=${have[level][`${tx}_${ty}`]}`; // immutable URL per content
     },
     tileExists: (level: number, x: number, y: number) => {
       const [tx, ty] = global(level, x, y);
@@ -59,7 +75,7 @@ function tileSource(layer: string) {
 
 const viewer = OpenSeadragon({
   element: document.getElementById("map")!,
-  tileSources: tileSource("map") as unknown as OpenSeadragon.TileSourceOptions,
+  tileSources: tileSource("map", mapIndex) as unknown as OpenSeadragon.TileSourceOptions,
   showNavigationControl: false,
   drawer: "canvas",       // WebGL drawer leaves coloured fringes at transparent tile edges
   subPixelRoundingForTransparency: { "*": OpenSeadragon.SUBPIXEL_ROUNDING_OCCURRENCES.ALWAYS }, // no hairline seams between tiles
@@ -104,14 +120,18 @@ const globalToViewport = (x: number, y: number) => base().imageToViewportCoordin
 // ---- overlay: borders, labels, traffic ------------------------------------------------------
 let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
-let traffic: Traffic | null = null, cats: Cats | null = null, parrots: Parrots | null = null;
-const planes = world.airport ? new Planes(world.enu2px, world.airport) : null;
-// roads (~2 MB) feed only the animations: fetch them once the first view's tiles are in, not alongside them
-let roadsRequested = false;
-function loadRoads() {
-  if (roadsRequested) return;
-  roadsRequested = true;
-  fetch(`${BASE}/data/roads.json`).then((r) => (r.ok ? r.json() : [])).then((roads: Road[]) => {
+let traffic: Traffic | null = null, cats: Cats | null = null, parrots: Parrots | null = null, planes: Planes | null = null;
+// the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
+let animationsRequested = false;
+function loadAnimations() {
+  if (animationsRequested) return;
+  animationsRequested = true;
+  Promise.all([
+    import("./traffic.ts"), import("./cats.ts"), import("./sky.ts"), import("./roads.ts"),
+    fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
+  ]).then(([{ Traffic }, { Cats }, { Planes, Parrots }, { decodeRoads }, data]) => {
+    const roads = decodeRoads(data);
+    if (world.airport) planes = new Planes(world.enu2px, world.airport);
     if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
     if (roads.length) cats = new Cats(roads, world.enu2px);
     if (roads.length) { // parakeets roam over the streets' extent
@@ -124,7 +144,7 @@ function loadRoads() {
     Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: parrots, __planes: planes });
   });
 }
-setTimeout(loadRoads, 6000); // slow connection: don't wait for every tile forever
+setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
 
 // biggest cities get their label first when labels would collide
 const ringArea = (r: Array<[number, number]>) => Math.abs(r.reduce((a, [y, x], i) => { const [y2, x2] = r[(i + 1) % r.length]; return a + x * y2 - x2 * y; }, 0) / 2);
@@ -177,13 +197,16 @@ function frame(t: number) {
   const film = (window as { __film?: { dt: number } }).__film;
   const dt = film ? film.dt : (t - lastT) / 1000;
   if (film) film.dt = 0;
-  if (traffic && showTraffic) {
+  // zoomed out too far to see them (their draw() thresholds), cars and cats pause instead of
+  // simulating thousands of invisible movers every frame
+  const px = k / dpr;
+  if (traffic && showTraffic && px >= 0.14) {
     traffic.step(dt);
-    traffic.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]);
+    traffic.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
-  if (cats && showTraffic) {
+  if (cats && showTraffic && px >= 0.6) {
     cats.step(dt);
-    cats.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]);
+    cats.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
   if (showTraffic) { // sky above everything: parakeets, then the airliner
     if (parrots) { parrots.step(dt); parrots.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]); }
@@ -196,13 +219,15 @@ function frame(t: number) {
 requestAnimationFrame(frame);
 
 // ---- controls ----------------------------------------------------------------------------------
-let photo: OpenSeadragon.TiledImage | null = null;
+let photo: OpenSeadragon.TiledImage | null = null, photoRequested = false;
 function togglePhoto() {
   if (!photo) {
-    viewer.addTiledImage({
-      tileSource: tileSource("photo") as unknown as OpenSeadragon.TileSourceOptions,
+    if (photoRequested) return; // still loading its index
+    photoRequested = true;
+    layerIndex("photo").then((have) => viewer.addTiledImage({
+      tileSource: tileSource("photo", have) as unknown as OpenSeadragon.TileSourceOptions,
       success: (e) => { photo = (e as unknown as { item: OpenSeadragon.TiledImage }).item; },
-    });
+    }));
   } else photo.setOpacity(photo.getOpacity() > 0 ? 0 : 1);
 }
 
@@ -215,13 +240,27 @@ window.addEventListener("keydown", (e) => {
 });
 if (new URLSearchParams(location.search).has("video")) document.body.classList.add("video");
 
+// ---- opening preview (MapPage.astro): the city's view as one small image until the tiles are in ----
+const preview = document.getElementById("preview");
+function hidePreview(fast: boolean) {
+  if (!preview?.isConnected) return;
+  preview.style.transition = `opacity ${fast ? 0.15 : 0.45}s ease-out`;
+  preview.style.opacity = "0";
+  setTimeout(() => preview.remove(), fast ? 200 : 500);
+}
+if (preview) {
+  // the image is laid out for the plain city view only; any gesture moves the map away from it
+  for (const ev of ["canvas-press", "canvas-scroll", "canvas-pinch", "canvas-key"] as const) viewer.addOnceHandler(ev, () => hidePreview(true));
+  setTimeout(() => hidePreview(false), 15000);
+}
+
 // Opening view, first match wins:
 //   #@x,y,zoom          deep link (global art px, viewer zoom), kept up to date while you pan
 //   ?at=lat,lon[,km]    a place, with the screen width in km (default 1.5)
 //   #metro              the whole region with borders
 //   otherwise           the page's city (centre + width from places.ts)
 viewer.addOnceHandler("open", () => {
-  base().addOnceHandler("fully-loaded-change", loadRoads); // first view's tiles are drawn
+  base().addOnceHandler("fully-loaded-change", () => { loadAnimations(); hidePreview(false); }); // first view's tiles are drawn
   const [[y0, x0], [y1, x1]] = world.bounds;
   // never zoom out past the whole metro (all city borders) with a small margin
   let mx0 = x0, my0 = y0, mx1 = x1, my1 = y1;

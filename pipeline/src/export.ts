@@ -6,12 +6,16 @@
  * All areas must belong to one region. Only files that differ from what is published (R2) are
  * written, into the local cache data/web/regions/<region>/ (served by `npm run dev` over production;
  * `npm run publish -- <region>` uploads and empties it):
- *   tiles/map/{z}/{x}/{y}.webp    painted tiles where available, 3D render elsewhere
- *   tiles/photo/{z}/{x}/{y}.webp  3D render only (toggle)
- *   data/tiles.json               every tile per layer and zoom with its content hash (URL ?v=)
- *   data/world.json               camera, bounds, tile origin, ENU→pixel map, attributions
- *   data/borders.json             OSM city borders in art-pixel space, on real terrain
- *   data/roads.json               drivable roads (ENU, 4 m samples + occlusion) for traffic
+ *   tiles/map/{z}/{x}/{y}.avif         painted tiles where available, 3D render elsewhere
+ *   tiles/photo/{z}/{x}/{y}.avif       3D render only (toggle)
+ *   data/world.json                    camera, bounds, tile origin, ENU→pixel map, attributions, and
+ *                                      the names of the files below (the only mutable file)
+ *   data/tiles-<layer>.<hash>.json     every tile of a layer per zoom with its content hash (URL ?v=)
+ *   data/borders.<hash>.json           OSM city borders in art-pixel space, on real terrain
+ *   data/roads.<hash>.json             drivable roads for traffic (columnar, delta-coded: encodeRoads)
+ *   preview/<city>-<land|port>.<hash>.avif  the city's opening view, shown until the tiles are in
+ * Content-hashed names never change, so browsers keep them for a year; world.json says which are current.
+ * The legacy data/tiles.json + .webp tiles stay on R2 untouched: the viewer's fallback without AVIF.
  * What is published (tile sources + hashes) is tracked in data/web-state/<region>.json; an export not
  * yet published keeps its state next to the cache (data/web/<region>.state.json) so exports stack.
  *
@@ -26,14 +30,15 @@ import { AREAS, GROUND_H, areaPolygon, insideDistance, openArea } from "./areas.
 import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, llhToPixel } from "./camera.ts";
 import { HOSTING } from "./hosting.ts";
 import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
-import { REGIONS } from "./places.ts";
+import { CITIES, REGIONS } from "./places.ts";
 import { readHeights } from "./heights.ts";
 
 const TS = 512;                  // web tile size
 const SPLIT = CAMERA.tile / TS;  // web tiles per art tile edge
 const NATIVE_Z = 8;
 const MIN_Z = 2;
-const QUALITY = 72;
+/** AVIF q50 ≈ the old WebP q72 in PSNR at ~40% fewer bytes (measured on painted tiles). */
+const FORMAT = "avif", QUALITY = 50;
 const MARGIN = 16; // neighbour pixels used when building each zoomed-out tile
 /** Soft map edge: tiles fade out toward the areas' true outline instead of ending in tile steps.
  *  Fully transparent within EDGE0 of the outline (half a render tile's diagonal: the staircase
@@ -75,20 +80,21 @@ const hash = (b: Buffer | string) => createHash("sha1").update(b).digest("hex").
 const pendingFile = () => join(WEB_CACHE, `${activeRegion()}.state.json`);
 const publishedFile = () => join(WEB_STATE, `${activeRegion()}.json`);
 
-/** A data file (JSON) for the region, written to the cache only when it differs from the published one. */
+/** A content-addressed data file data/<name>.<hash>.json, written to the cache only when it differs
+ *  from the published one (the old one stays on R2 for pages still pointing at it). */
 function writeData(name: string, content: string) {
   const h = hash(content);
-  if (state.data[name] === h) return false;
+  if (state.data[name] === h) return;
   mkdirSync(join(OUT, "data"), { recursive: true });
-  writeFileSync(join(OUT, "data", name), content);
+  writeFileSync(join(OUT, "data", `${name}.${h}.json`), content);
   state.data[name] = h;
-  return true;
 }
+const dataFile = (name: string) => (state.data[name] ? `${name}.${state.data[name]}.json` : undefined);
 
 /** A tile built earlier: from the cache if it is waiting to be published, else from production. */
 const fetched = new Map<string, Buffer>();
 async function readTile(layer: string, z: number, x: number, y: number): Promise<Buffer> {
-  const rel = `tiles/${layer}/${z}/${x}/${y}.webp`, local = join(OUT, rel);
+  const rel = `tiles/${layer}/${z}/${x}/${y}.${FORMAT}`, local = join(OUT, rel);
   if (existsSync(local)) return readFileSync(local);
   if (fetched.has(rel)) return fetched.get(rel)!;
   const v = state.layers[layer]?.hashes[`${z}/${x}_${y}`];
@@ -146,6 +152,13 @@ function deckSvg(x0: number, y0: number) {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${TS}" height="${TS}">${body}</svg>`);
 }
 
+/** Run tile jobs a few at a time (AVIF encoding is the slow part; sharp works off the main thread). */
+const PARALLEL = 8;
+async function pool(jobs: Array<() => Promise<void>>) {
+  let next = 0;
+  await Promise.all(Array.from({ length: PARALLEL }, async () => { while (next < jobs.length) await jobs[next++](); }));
+}
+
 async function exportLayer(layer: string, sources: Map<Key, string>) {
   index[layer] = {};
   const root = join(OUT, "tiles", layer);
@@ -153,36 +166,40 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
   const st = (state.layers[layer] ??= { sources: {}, hashes: {} });
   const prevSources = st.sources, nextSources: Record<string, string> = {}, hashes: Record<string, string> = {};
   const save = async (img: ReturnType<typeof sharp>, z: number, x: number, y: number) => {
-    const buf = await img.webp({ quality: QUALITY, effort: 4 }).toBuffer();
+    const buf = await img.avif({ quality: QUALITY, effort: 4 }).toBuffer();
     mkdirSync(join(root, `${z}`, `${x}`), { recursive: true });
-    writeFileSync(join(root, `${z}`, `${x}`, `${y}.webp`), buf);
+    writeFileSync(join(root, `${z}`, `${x}`, `${y}.${FORMAT}`), buf);
     hashes[`${z}/${x}_${y}`] = hash(buf);
   };
   // native zoom: split each 1024 art tile into 512 web tiles (only when the source changed)
   let level = new Map<Key, number>(); // key -> source mtime
   let changed = new Set<Key>();
+  const jobs: Array<() => Promise<void>> = [];
   for (const [k, file] of sources) {
     const [tx, ty] = parse(k);
     const painted = layer === "map" && file.includes("/paint/");
-    const m = statSync(file).mtimeMs, stamp = `${file}@${m}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : ""}`;
+    const m = statSync(file).mtimeMs, stamp = `${file}@${m}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : ""}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
         level.set(key(x, y), m);
         nextSources[key(x, y)] = stamp;
         if (h && prevSources[key(x, y)] === stamp) { hashes[`${NATIVE_Z}/${x}_${y}`] = h; continue; }
-        let img = sharp(file).extract({ left: i * TS, top: j * TS, width: TS, height: TS });
-        const svg = painted ? deckSvg(x * TS, y * TS) : null;
-        if (svg) img = sharp(await img.png().toBuffer()).composite([{ input: svg }]);
-        const rgb = await img.removeAlpha().raw().toBuffer();
-        const alpha = edgeAlpha(x * TS, y * TS);
-        // fade baked toward the page background: opaque tiles, so no seams where tiles meet
-        if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
-          rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * (alpha[p] / 255));
-        await save(sharp(rgb, { raw: { width: TS, height: TS, channels: 3 } }), NATIVE_Z, x, y);
         changed.add(key(x, y));
+        jobs.push(async () => {
+          let img = sharp(file).extract({ left: i * TS, top: j * TS, width: TS, height: TS });
+          const svg = painted ? deckSvg(x * TS, y * TS) : null;
+          if (svg) img = sharp(await img.png().toBuffer()).composite([{ input: svg }]);
+          const rgb = await img.removeAlpha().raw().toBuffer();
+          const alpha = edgeAlpha(x * TS, y * TS);
+          // fade baked toward the page background: opaque tiles, so no seams where tiles meet
+          if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
+            rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * (alpha[p] / 255));
+          await save(sharp(rgb, { raw: { width: TS, height: TS, channels: 3 } }), NATIVE_Z, x, y);
+        });
       }
   }
+  await pool(jobs);
   console.log(`  ${layer} z${NATIVE_Z}: ${level.size} (${changed.size} updated)`);
   const keep = (z: number) => Object.fromEntries([...level.keys()].map((k) => [k, hashes[`${z}/${k}`]]));
   index[layer][NATIVE_Z] = keep(NATIVE_Z);
@@ -195,30 +212,34 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
       parents.get(p)!.push([x, y]);
     }
     const next = new Map<Key, number>(), nextChanged = new Set<Key>();
+    jobs.length = 0;
     for (const [p, kids] of parents) {
       const [px, py] = parse(p);
       const h = st.hashes[`${z}/${p}`];
       next.set(p, Math.max(...kids.map(([x, y]) => level.get(key(x, y))!)));
       if (h && !kids.some(([x, y]) => changed.has(key(x, y)))) { hashes[`${z}/${p}`] = h; continue; }
-      // the 2×2 children plus a MARGIN strip of their neighbours, so the downscale filter sees
-      // across tile edges (otherwise faint lines appear along tile borders at low zoom)
-      const composite = [];
-      for (let y = py * 2 - 1; y <= py * 2 + 2; y++) for (let x = px * 2 - 1; x <= px * 2 + 2; x++) {
-        if (!level.has(key(x, y))) continue;
-        const left = (x - px * 2) * TS + MARGIN, top = (y - py * 2) * TS + MARGIN;
-        const cut = { left: Math.max(0, -left), top: Math.max(0, -top) };
-        const width = Math.min(TS - cut.left, TS * 2 + 2 * MARGIN - Math.max(0, left)), height = Math.min(TS - cut.top, TS * 2 + 2 * MARGIN - Math.max(0, top));
-        if (width <= 0 || height <= 0) continue;
-        const input = await sharp(await readTile(layer, z + 1, x, y)).extract({ ...cut, width, height }).toBuffer();
-        composite.push({ input, left: Math.max(0, left), top: Math.max(0, top) });
-      }
-      const S = TS * 2 + 2 * MARGIN;
-      const merged = await sharp({ create: { width: S, height: S, channels: 3, background: { r: BG[0], g: BG[1], b: BG[2] } } })
-        .composite(composite).png().toBuffer();
-      const half = await sharp(merged).resize(S / 2, S / 2, { kernel: "lanczos3" }).png().toBuffer();
-      await save(sharp(half).extract({ left: MARGIN / 2, top: MARGIN / 2, width: TS, height: TS }), z, px, py);
       nextChanged.add(p);
+      jobs.push(async () => {
+        // the 2×2 children plus a MARGIN strip of their neighbours, so the downscale filter sees
+        // across tile edges (otherwise faint lines appear along tile borders at low zoom)
+        const composite = [];
+        for (let y = py * 2 - 1; y <= py * 2 + 2; y++) for (let x = px * 2 - 1; x <= px * 2 + 2; x++) {
+          if (!level.has(key(x, y))) continue;
+          const left = (x - px * 2) * TS + MARGIN, top = (y - py * 2) * TS + MARGIN;
+          const cut = { left: Math.max(0, -left), top: Math.max(0, -top) };
+          const width = Math.min(TS - cut.left, TS * 2 + 2 * MARGIN - Math.max(0, left)), height = Math.min(TS - cut.top, TS * 2 + 2 * MARGIN - Math.max(0, top));
+          if (width <= 0 || height <= 0) continue;
+          const input = await sharp(await readTile(layer, z + 1, x, y)).extract({ ...cut, width, height }).toBuffer();
+          composite.push({ input, left: Math.max(0, left), top: Math.max(0, top) });
+        }
+        const S = TS * 2 + 2 * MARGIN;
+        const merged = await sharp({ create: { width: S, height: S, channels: 3, background: { r: BG[0], g: BG[1], b: BG[2] } } })
+          .composite(composite).png().toBuffer();
+        const half = await sharp(merged).resize(S / 2, S / 2, { kernel: "lanczos3" }).png().toBuffer();
+        await save(sharp(half).extract({ left: MARGIN / 2, top: MARGIN / 2, width: TS, height: TS }), z, px, py);
+      });
     }
+    await pool(jobs);
     level = next;
     changed = nextChanged;
     index[layer][z] = keep(z);
@@ -294,7 +315,7 @@ async function exportBorders(heights: Heights) {
     }
     feats.push({ id: el.id, name: el.tags.name, name_en: el.tags["name:en"], rings: out, label: labelPoint(out) });
   }
-  writeData("borders.json", JSON.stringify(feats));
+  writeData("borders", JSON.stringify(feats));
   console.log(`  borders: ${feats.length} cities`);
 }
 
@@ -355,8 +376,37 @@ async function exportRoads(areas: string[], heights: Heights) {
     if (edgeDistance(x, y) < (EDGE0 + EDGE1) / 2) { w.s[k + 3] = 0; occluded++; }
   }
   bridgeDecks(ways);
-  writeData("roads.json", JSON.stringify(ways.map(({ y, ...w }) => w)));
+  writeData("roads", JSON.stringify(encodeRoads(ways)));
   console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
+}
+
+/**
+ * Roads for the viewer, columnar and delta-coded (~2.6× smaller than one object per way after
+ * compression; decoded by web/src/scripts/roads.ts back into { c, o, l, w, a, b, s } per way):
+ *   c, o, l, w   per way: class, oneway, lanes, width (m)
+ *   a, b         per way: junction ids (OSM node ids renumbered 0…, only their identity matters)
+ *   n            per way: number of samples
+ *   s            per sample e, n, u in 0.1 m: a way's first sample absolute, then differences
+ *   v            per way: number of runs, then run lengths of visible / hidden samples, visible first
+ */
+function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }>) {
+  const ids = new Map<number, number>(), id = (n: number) => ids.get(n) ?? ids.set(n, ids.size).get(n)!;
+  const out = { v: 2, c: [] as number[], o: [] as number[], l: [] as number[], w: [] as number[], a: [] as number[], b: [] as number[], n: [] as number[], s: [] as number[], vis: [] as number[] };
+  for (const w of ways) {
+    out.c.push(w.c); out.o.push(w.o); out.l.push(w.l); out.w.push(w.w); out.a.push(id(w.a)); out.b.push(id(w.b));
+    out.n.push(w.s.length / 4);
+    let pe = 0, pn = 0, pu = 0, cur = 1, run = 0;
+    const runs: number[] = [];
+    for (let k = 0; k < w.s.length; k += 4) {
+      const e = Math.round(w.s[k] * 10), n = Math.round(w.s[k + 1] * 10), u = Math.round(w.s[k + 2] * 10);
+      out.s.push(e - pe, n - pn, u - pu);
+      pe = e; pn = n; pu = u;
+      if (w.s[k + 3] === cur) run++; else { runs.push(run); cur = w.s[k + 3]; run = 1; }
+    }
+    runs.push(run);
+    out.vis.push(runs.length, ...runs);
+  }
+  return out;
 }
 
 /**
@@ -447,6 +497,54 @@ function stitch(ways: Array<Array<[number, number]>>) {
   return rings;
 }
 
+/**
+ * Each city's opening view as one small image (and a ~0.5 KB blurred version inlined in the page), so
+ * the first frame shows the map at once and the tiles fade in over it. The viewer opens a city
+ * centred on `center` with `widthM` across the screen; the image covers that width and a fixed
+ * height: H = 0.8 W for landscape screens (aspect ≥ 5:4), 2.2 W for portrait. The page lays it out with CSS
+ * only (full width, centred vertically), so it lines up with the map before any script runs.
+ */
+const PREVIEWS = { land: { aspect: 0.8, width: 768 }, port: { aspect: 2.2, width: 480 } };
+async function exportPreviews() {
+  const out: Record<string, Record<string, { file: string; lqip: string }>> = {};
+  for (const [slug, city] of Object.entries(CITIES)) {
+    if (city.region !== activeRegion()) continue;
+    const [cx, cy] = llhToPixel(city.center[0], city.center[1], 25); // as the viewer's show()
+    const W = city.widthM / CAMERA.mpp;
+    out[slug] = {};
+    for (const [kind, { aspect, width }] of Object.entries(PREVIEWS)) {
+      const H = W * aspect, height = Math.round(width * aspect);
+      // the finest zoom that still has at least `width` pixels across the view
+      const z = Math.min(NATIVE_Z, NATIVE_Z - Math.floor(Math.log2(W / width)));
+      const f = 2 ** (z - NATIVE_Z), span = TS / f;
+      const x0 = cx - W / 2, y0 = cy - H / 2;
+      const composite = [];
+      for (let ty = Math.floor(y0 / span); ty <= Math.floor((y0 + H) / span); ty++)
+        for (let tx = Math.floor(x0 / span); tx <= Math.floor((x0 + W) / span); tx++) {
+          if (!index.map?.[z]?.[key(tx, ty)] && !state.layers.map?.hashes[`${z}/${tx}_${ty}`]) continue;
+          composite.push({ input: await readTile("map", z, tx, ty), left: Math.round((tx * span - x0) * f), top: Math.round((ty * span - y0) * f) });
+        }
+      const cw = Math.round(W * f), ch = Math.round(H * f);
+      const inside = composite.filter((c) => c.left < cw && c.top < ch && c.left > -TS && c.top > -TS);
+      // sharp composites need inputs inside the canvas: pad by a tile on every side, then crop
+      const canvas = await sharp({ create: { width: cw + 2 * TS, height: ch + 2 * TS, channels: 3, background: { r: BG[0], g: BG[1], b: BG[2] } } })
+        .composite(inside.map((c) => ({ ...c, left: c.left + TS, top: c.top + TS }))).png().toBuffer();
+      const view = await sharp(canvas).extract({ left: TS, top: TS, width: cw, height: ch }).resize(width, height, { kernel: "lanczos3" }).png().toBuffer();
+      const img = await sharp(view).avif({ quality: 45, effort: 6 }).toBuffer();
+      const name = `preview/${slug}-${kind}`, h = hash(img), file = `${name}.${h}.${FORMAT}`;
+      if (state.data[name] !== h) {
+        mkdirSync(join(OUT, "preview"), { recursive: true });
+        writeFileSync(join(OUT, file), img);
+        state.data[name] = h;
+      }
+      const tiny = await sharp(view).resize(24, Math.round(24 * aspect)).webp({ quality: 40 }).toBuffer();
+      out[slug][kind] = { file, lqip: `data:image/webp;base64,${tiny.toString("base64")}` };
+      console.log(`  preview ${slug} ${kind}: ${width}×${height} from z${z}, ${(img.length / 1024).toFixed(0)} KB`);
+    }
+  }
+  return out;
+}
+
 let OUT = ""; // data/web/regions/<region>
 
 async function main() {
@@ -481,15 +579,16 @@ async function main() {
   if (!process.argv.includes("--data-only")) {
     await exportLayer("map", new Map([...photo, ...art])); // painted wins
     await exportLayer("photo", photo);
-    writeData("tiles.json", JSON.stringify(index));
+    for (const layer of Object.keys(index)) writeData(`tiles-${layer}`, JSON.stringify(index[layer]));
   }
   await exportBorders(heights);
+  const previews = await exportPreviews();
   // OpenSeadragon wants non-negative tile indices at every level: origin aligned to a min-zoom tile
   const block = TS * 2 ** (NATIVE_Z - MIN_Z);
   const ox = Math.floor(x0 / block) * block, oy = Math.floor(y0 / block) * block;
   const { right: r, up: u } = axes();
   const m = CAMERA.mpp;
-  writeData("world.json", JSON.stringify({
+  const world = JSON.stringify({
     tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
     origin: [ox, oy], size: [Math.ceil((x1 - ox) / block) * block, Math.ceil((y1 - oy) / block) * block],
     // ENU meters -> art pixels (linear; ENU origin = pixel origin)
@@ -497,11 +596,19 @@ async function main() {
     camera: camera(), title: REGIONS[activeRegion()].title, credits: REGIONS[activeRegion()].credits,
     airport: REGIONS[activeRegion()].airport ?? null, areas: areas.map((a) => ({ id: a, title: AREAS[a]?.title })),
     layers: { photo: photo.size, art: art.size }, attributions: [...attributions],
-  }, null, 2));
+    format: FORMAT,
+    files: { "tiles-map": dataFile("tiles-map"), "tiles-photo": dataFile("tiles-photo"), borders: dataFile("borders"), roads: dataFile("roads") },
+    previews,
+  }, null, 2);
+  if (state.data["world.json"] !== hash(world)) {
+    mkdirSync(join(OUT, "data"), { recursive: true });
+    writeFileSync(join(OUT, "data", "world.json"), world);
+    state.data["world.json"] = hash(world);
+  }
   console.log(`  world.json: ${photo.size} rendered, ${art.size} painted tiles`);
   mkdirSync(WEB_CACHE, { recursive: true });
   writeFileSync(pendingFile(), JSON.stringify(state));
-  const files = existsSync(OUT) ? readdirSync(OUT, { recursive: true }).filter((f) => String(f).match(/\.(webp|json)$/)).length : 0;
+  const files = existsSync(OUT) ? readdirSync(OUT, { recursive: true }).filter((f) => String(f).match(/\.(avif|webp|json)$/)).length : 0;
   console.log(files ? `  ${files} files ready in ${OUT}\n  preview: npm run dev · publish: npm run publish -- ${activeRegion()}` : "  nothing changed");
 }
 

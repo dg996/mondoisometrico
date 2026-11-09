@@ -22,7 +22,8 @@ export const HOSTING = {
   get accountId() { return need("CLOUDFLARE_ACCOUNT_ID"); },
   /** Public origin of the bucket (its custom domain), no trailing slash. */
   get origin() { return need("TILES_ORIGIN").replace(/\/+$/, ""); },
-  /** Cache-Control per kind: tile URLs carry ?v=<content hash>, so they never change. */
+  /** Cache-Control per kind: tile URLs carry ?v=<content hash> and data/preview files their hash in the
+   *  name, so they never change (cacheTiles); only data/world.json is rewritten in place (cacheData). */
   cacheTiles: "public, max-age=31536000, immutable",
-  cacheData: "public, max-age=60",
+  cacheData: "public, max-age=60, stale-while-revalidate=600",
 };

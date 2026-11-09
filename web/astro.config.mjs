@@ -15,7 +15,7 @@ if (existsSync(ENV)) process.loadEnvFile(ENV);
  * The built site loads R2 directly.
  */
 const CACHE = fileURLToPath(new URL('../data/web/', import.meta.url));
-const TYPES = { webp: 'image/webp', json: 'application/json' };
+const TYPES = { avif: 'image/avif', webp: 'image/webp', json: 'application/json' };
 
 /** @returns {import('vite').Plugin} */
 const regionsOverlay = () => ({
@@ -25,7 +25,7 @@ const regionsOverlay = () => ({
 			const path = decodeURIComponent((req.url ?? '/').split('?')[0]);
 			const file = CACHE + 'regions' + path;
 			if (!path.includes('..') && existsSync(file) && statSync(file).isFile()) {
-				res.setHeader('Content-Type', TYPES[/** @type {'webp'|'json'} */ (file.split('.').pop())] ?? 'application/octet-stream');
+				res.setHeader('Content-Type', TYPES[/** @type {'avif'|'webp'|'json'} */ (file.split('.').pop())] ?? 'application/octet-stream');
 				res.setHeader('Cache-Control', 'no-store');
 				res.setHeader('X-Source', 'local-cache');
 				createReadStream(file).pipe(res);
@@ -46,7 +46,7 @@ export default defineConfig({
 	site: process.env.SITE_DOMAIN ? `https://${process.env.SITE_DOMAIN}` : undefined,
 	vite: {
 		// the browser has no process.env: bake the tile origin into the viewer
-		define: { __TILES_ORIGIN__: JSON.stringify(HOSTING.origin) },
+		define: { __TILES_ORIGIN__: JSON.stringify(HOSTING.origin), __WEB_CACHE__: JSON.stringify(CACHE) },
 		// pre-bundle the viewer so the dev server never serves a stale dependency
 		optimizeDeps: { include: ['openseadragon'] },
 		plugins: [regionsOverlay()],

@@ -1,13 +1,30 @@
 ---
 /** The map page of one city: its region's flat map, opened centred on the city. */
 import { CITIES, REGIONS } from "../../../pipeline/src/places.ts";
+import { existsSync, readFileSync } from "node:fs";
 import { HOSTING } from "../../../pipeline/src/hosting.ts";
+declare const __WEB_CACHE__: string; // data/web/, injected by astro.config.mjs
 interface Props { city: string }
+interface Preview { file: string; lqip: string }
+interface World { files?: Record<string, string>; previews?: Record<string, { land: Preview; port: Preview }> }
 const { city } = Astro.props;
 const c = CITIES[city], region = REGIONS[c.region];
 // map data comes from R2 (same-origin /regions in dev): start its downloads with the HTML, not after the script
 const tilesOrigin = import.meta.env.DEV ? "" : HOSTING.origin;
-const data = `${tilesOrigin}/regions/${c.region}/data`;
+const regionBase = `${tilesOrigin}/regions/${c.region}`, data = `${regionBase}/data`;
+// the region's world.json as published (in dev: the export cache first, as the dev server serves it):
+// names of the current content-hashed files to preload, and the city's preview
+async function loadWorld(): Promise<World> {
+  const local = `${__WEB_CACHE__}regions/${c.region}/data/world.json`;
+  if (import.meta.env.DEV && existsSync(local)) return JSON.parse(readFileSync(local, "utf8"));
+  try {
+    const r = await fetch(`${HOSTING.origin}/regions/${c.region}/data/world.json?build=${Date.now()}`);
+    return r.ok ? await r.json() : {};
+  } catch { return {}; }
+}
+const world = await loadWorld();
+const preload = world.files ? [world.files["tiles-map"], world.files.borders].filter(Boolean) : ["tiles.json", "borders.json"];
+const pv = world.previews?.[city];
 ---
 
 <html lang="en">
@@ -20,14 +37,30 @@ const data = `${tilesOrigin}/regions/${c.region}/data`;
 		<title>{c.title} · Isometric World</title>
 		{tilesOrigin && <link rel="preconnect" href={tilesOrigin} crossorigin="anonymous" />}
 		<link rel="preload" href={`${data}/world.json`} as="fetch" crossorigin="anonymous" />
-		<link rel="preload" href={`${data}/tiles.json`} as="fetch" crossorigin="anonymous" />
-		<link rel="preload" href={`${data}/borders.json`} as="fetch" crossorigin="anonymous" />
+		{preload.map((f) => <link rel="preload" href={`${data}/${f}`} as="fetch" crossorigin="anonymous" />)}
 		<meta name="description" content={`${c.title} as a hand-painted isometric map, built from open data.`} />
 		{/* Pirsch Analytics (cookie-free), proxied first-party by worker/index.ts; the access key is a Worker secret */}
 		{!import.meta.env.DEV && <script is:inline defer src="/p/s.js" id="pianjs" data-hit-endpoint="/p/v" data-event-endpoint="/p/e" data-session-endpoint="/p/k"></script>}
 	</head>
 	<body data-city={city} data-region={c.region}>
 		<div id="map"></div>
+		{pv && (
+			/* the opening view as one image (and a blurred inline version until it loads); map.ts fades it out
+			   once the tiles are in. Laid out like the viewer opens the city: full width, centred vertically. */
+			<div id="preview" aria-hidden="true" style={`--lqip-land: url(${pv.land.lqip}); --lqip-port: url(${pv.port.lqip})`}>
+				<div class="frame">
+					<div class="lqip"></div>
+					<picture>
+						<source media="(max-aspect-ratio: 5/4)" srcset={`${regionBase}/${pv.port.file}`} type="image/avif" />
+						<img src={`${regionBase}/${pv.land.file}`} alt="" fetchpriority="high" decoding="async" />
+					</picture>
+				</div>
+			</div>
+		)}
+		<script is:inline>
+			// a deep link (#@x,y,z, #metro, ?at=) opens somewhere else: no preview
+			if (/^#(@|metro)/.test(location.hash) || new URLSearchParams(location.search).has("at")) document.getElementById("preview")?.remove();
+		</script>
 		<footer id="credits"></footer>
 		<!-- video mode (?video or V): big credit line above the area social apps cover with their UI -->
 		<div id="video-credit">{region.credits.map((line, i) => <>{i > 0 && <br />}{line}</>)}</div>
@@ -38,6 +71,15 @@ const data = `${tilesOrigin}/regions/${c.region}/data`;
 			/* the map owns every gesture: no browser pan/pinch/double-tap zoom of the page, no long-press callout */
 			#map { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 			#map { position: fixed; inset: 0; background: #0e0f12; }
+			#preview { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; background: #0e0f12; }
+			/* landscape: the image is 0.8 × as tall as wide; portrait and squarish screens: 2.2 × (export.ts PREVIEWS) */
+			#preview .frame { position: absolute; left: 0; top: 50%; width: 100%; aspect-ratio: 1 / 0.8; transform: translateY(-50%); }
+			#preview .lqip { position: absolute; inset: 0; background: var(--lqip-land) center / 100% 100%; filter: blur(12px); }
+			#preview img { position: absolute; inset: 0; width: 100%; height: 100%; }
+			@media (max-aspect-ratio: 5/4) {
+				#preview .frame { aspect-ratio: 1 / 2.2; }
+				#preview .lqip { background-image: var(--lqip-port); }
+			}
 			#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
 			#credits { position: fixed; right: 0; bottom: 0; z-index: 10; font-size: 11px; line-height: 1.4; max-width: calc(100vw - 48px);
 				padding: 3px calc(8px + env(safe-area-inset-right, 0px)) calc(3px + env(safe-area-inset-bottom, 0px)) 8px;

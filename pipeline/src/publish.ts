@@ -4,8 +4,8 @@
  *   npm run publish -- israel-center [--yes] [--keep]
  *
  * Uploads everything in data/web/regions/<region>/ (only what `npm run export` changed) to the
- * bucket in hosting.ts: tiles first, data JSON last (so the live site never points at a tile that is
- * not there yet). Each upload is checked (stored size = local size); then the export's state becomes
+ * bucket in hosting.ts: tiles first, then previews and the content-hashed data files, world.json last
+ * (it names the current files, so the live site never points at one that is not there yet). Each upload is checked (stored size = local size); then the export's state becomes
  * the published state (data/web-state/<region>.json) and the cache is deleted (--keep: leave it).
  *
  * Rate: the Cloudflare REST API allows ~4 uploads/s, so a full region (~9k files) takes ~40 min the
@@ -27,10 +27,11 @@ if (!REGIONS[region]) throw new Error(`unknown region ${region}`);
 const dir = join(WEB_CACHE, "regions", region), pending = join(WEB_CACHE, `${region}.state.json`);
 if (!existsSync(dir)) { console.log(`nothing to publish: ${dir} is empty (run npm run export first)`); process.exit(0); }
 
-const files = readdirSync(dir, { recursive: true }).map(String).filter((f) => /\.(webp|json)$/.test(f))
-  .sort((a, b) => Number(a.startsWith("data/")) - Number(b.startsWith("data/")) || Number(a.endsWith("tiles.json")) - Number(b.endsWith("tiles.json")));
+const rank = (f: string) => (f.startsWith("tiles/") ? 0 : f.endsWith("world.json") ? 2 : 1);
+const files = readdirSync(dir, { recursive: true }).map(String).filter((f) => /\.(avif|webp|json)$/.test(f))
+  .sort((a, b) => rank(a) - rank(b));
 const bytes = files.reduce((s, f) => s + statSync(join(dir, f)).size, 0);
-const tiles = files.filter((f) => f.endsWith(".webp")).length;
+const tiles = files.filter((f) => f.startsWith("tiles/")).length;
 console.log(`${region}: ${tiles} tiles + ${files.length - tiles} data files, ${(bytes / 1e6).toFixed(1)} MB → r2://${HOSTING.bucket}/regions/${region}/ (${HOSTING.origin})`);
 if (!args.includes("--yes")) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -50,13 +51,15 @@ const RATE = 3.8;
 let nextSlot = Date.now();
 const slot = async () => { const t = Math.max(Date.now(), nextSlot); nextSlot = t + 1000 / RATE; await new Promise((r) => setTimeout(r, t - Date.now())); };
 
+const TYPES: Record<string, string> = { avif: "image/avif", webp: "image/webp", json: "application/json" };
 const api = `https://api.cloudflare.com/client/v4/accounts/${HOSTING.accountId}/r2/buckets/${HOSTING.bucket}/objects/`;
 async function put(rel: string) {
   const body = readFileSync(join(dir, rel)), key = `regions/${region}/${rel}`;
   const headers = (): Record<string, string> => ({
     Authorization: `Bearer ${token}`,
-    "Content-Type": rel.endsWith(".webp") ? "image/webp" : "application/json",
-    "Cache-Control": rel.endsWith(".webp") ? HOSTING.cacheTiles : HOSTING.cacheData,
+    "Content-Type": TYPES[rel.split(".").pop()!],
+    // world.json is the one name that is reused; tiles carry ?v=<hash>, everything else has it in its name
+    "Cache-Control": rel.endsWith("world.json") ? HOSTING.cacheData : HOSTING.cacheTiles,
   });
   for (let attempt = 1; ; attempt++) {
     try {
@@ -75,10 +78,10 @@ async function put(rel: string) {
   }
 }
 
-// tiles in parallel, then the data files in order (tiles.json last)
+// tiles and previews in parallel, then the data files in order (world.json last)
 const t0 = Date.now();
 let done = 0;
-const tileFiles = files.filter((f) => f.endsWith(".webp")), dataFiles = files.filter((f) => !f.endsWith(".webp"));
+const tileFiles = files.filter((f) => !f.startsWith("data/")), dataFiles = files.filter((f) => f.startsWith("data/")); // world.json sorts last
 const queue = [...tileFiles];
 await Promise.all(Array.from({ length: 8 }, async () => {
   for (let f = queue.shift(); f; f = queue.shift()) {
