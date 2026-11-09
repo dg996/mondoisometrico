@@ -59,6 +59,10 @@ while you pan), `#metro` (whole region).
 Build `npm run build`, deploy `npm run deploy` (builds, then `wrangler deploy` on `SITE_DOMAIN` from `.env`).
 Only the built pages go there.
 
+**Analytics:** Pirsch (cookie-free), proxied first-party by the site's Worker (`worker/index.ts`, only
+`/p/*`; snippet in `web/src/components/MapPage.astro`, production builds only). Set the access key once
+(Pirsch → Settings → Integration → Add Client, type "Access Key"): `npx wrangler secret put PIRSCH_ACCESS_KEY`.
+
 ### Map data (R2)
 
 Map data is not in git or `web/public`. It lives in the R2 bucket `isometricworldtiles` (Cloudflare account

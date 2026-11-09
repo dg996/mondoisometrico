@@ -23,6 +23,8 @@ const data = `${tilesOrigin}/regions/${c.region}/data`;
 		<link rel="preload" href={`${data}/tiles.json`} as="fetch" crossorigin="anonymous" />
 		<link rel="preload" href={`${data}/borders.json`} as="fetch" crossorigin="anonymous" />
 		<meta name="description" content={`${c.title} as a hand-painted isometric map, built from open data.`} />
+		{/* Pirsch Analytics (cookie-free), proxied first-party by worker/index.ts; the access key is a Worker secret */}
+		{!import.meta.env.DEV && <script is:inline defer src="/p/s.js" id="pianjs" data-hit-endpoint="/p/v" data-event-endpoint="/p/e" data-session-endpoint="/p/k"></script>}
 	</head>
 	<body data-city={city} data-region={c.region}>
 		<div id="map"></div>
