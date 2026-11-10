@@ -26,6 +26,8 @@ test("viewer draws activity only on completed tiles; legacy metadata starts no a
         files:{"tiles-map":"tiles-map.test.json",roads:"roads.test.json",borders:"borders.test.json"}};
       const roads=[{a:1,b:2,c:1,l:1,o:0,w:7,s:Array.from({length:901},(_,i)=>[i*2,500,65,1]).flat()}];
       const body=url.includes("world.json")?world:url.includes("roads")?roads:url.includes("tiles-map")?index:url.includes("tiles.json")?{map:index}:[];
+      // Bust browser HTTP cache between the activity and legacy passes of this test.
+      res.setHeader("cache-control","no-store");
       res.setHeader("content-type","application/json");res.end(JSON.stringify(body));return;
     }
     res.setHeader("content-type","text/html");res.end('<body data-city="roma" data-region="roma-centro"><style>body{margin:0}#map{position:fixed;inset:0;background:#e8e4dc}#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}</style><div id="map"></div><div id="credits"></div><script type="module" src="/app.js"></script></body>');
@@ -50,7 +52,9 @@ test("viewer draws activity only on completed tiles; legacy metadata starts no a
     });
     assert.ok(result.cars>0);assert.equal(result.escape,false);assert.equal(result.outside,false);
     assert.equal(result.planes,null);assert.equal(result.parrots,null);assert.deepEqual(errors,[]);
-    legacy=true;await page.goto(url);await page.waitForFunction(()=>!!(window as any).__world);
+    // Same origin+hash alone can hit bfcache and keep the previous module state; bump the query.
+    legacy=true;await page.goto(`${url.split("#")[0]}?legacy=1#${url.split("#")[1]??""}`,{waitUntil:"domcontentloaded"});
+    await page.waitForFunction(()=>!!(window as any).__world && !(window as any).__world.activity);
     // Run the actual delayed initializer without six seconds of wall-clock waiting.
     await page.evaluate(()=>{(window as any).__viewer.world.getItemAt(0).raiseEvent("fully-loaded-change");});
     assert.equal(await page.evaluate(()=>Boolean((window as any).__traffic)),false);
