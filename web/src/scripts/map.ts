@@ -3,8 +3,9 @@ import OpenSeadragon from "openseadragon";
 import type { Traffic } from "./traffic.ts";
 import type { Cats } from "./cats.ts";
 import type { Planes, Parrots, Airport } from "./sky.ts";
-import { CAMERA, llhToPixel, useRegion } from "../../../pipeline/src/camera.ts";
+import { CAMERA, llhToPixel, useRegion, ecefToEnu, llhToEcef } from "../../../pipeline/src/camera.ts";
 import { CITIES } from "../../../pipeline/src/places.ts";
+import { LANDMARKS } from "../../../pipeline/src/landmarks.ts";
 declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by astro.config.mjs
 
 interface World {
@@ -12,6 +13,8 @@ interface World {
   native_zoom: number;
   min_zoom: number;
   bounds: [[number, number], [number, number]]; // [[y0, x0], [y1, x1]] global art px
+  /** Painted (ready) AABB — clamp pan/zoom here. Falls back to city opening view. */
+  playable?: [[number, number], [number, number]];
   origin: [number, number];                     // global px of image (0, 0)
   size: [number, number];
   enu2px: number[][];
@@ -87,9 +90,10 @@ const viewer = OpenSeadragon({
   imageLoaderLimit: 8,
   minPixelRatio: 0.8,     // fetch the finer level only once it is really needed (~40% fewer bytes)
   maxImageCacheCount: 600,
-  minZoomImageRatio: 0.01, // real limit is set on open: the whole metro
+  minZoomImageRatio: 0.2, // raised further on open to the ready/playable map
   maxZoomPixelRatio: 2.5,
-  visibilityRatio: 0.4,
+  visibilityRatio: 1,       // keep the ready map filling the viewport — no black void
+  constrainDuringPan: true,
   zoomPerScroll: 1.35,
   smoothTileEdgesMinZoom: Infinity,
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true, flickEnabled: true },
@@ -131,7 +135,13 @@ function loadAnimations() {
     fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
   ]).then(([{ Traffic }, { Cats }, { Planes, Parrots }, { decodeRoads }, data]) => {
     const roads = decodeRoads(data);
-    if (world.airport) planes = new Planes(world.enu2px, world.airport);
+    if (world.airport) {
+      // Scenic overflights cross the city centre so planes are visible even when the real
+      // approach corridor (e.g. FCO 16L) never clips the painted centro.
+      const [clat, clon] = city.center;
+      const enu = ecefToEnu(llhToEcef(clat, clon, 50));
+      planes = new Planes(world.enu2px, world.airport, [enu[0], enu[1]]);
+    }
     if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
     if (roads.length) cats = new Cats(roads, world.enu2px);
     if (roads.length) { // parakeets roam over the streets' extent
@@ -139,7 +149,7 @@ function loadAnimations() {
       for (const r of roads) for (let i = 0; i < r.s.length; i += 4) {
         a[0] = Math.min(a[0], r.s[i]); a[1] = Math.min(a[1], r.s[i + 1]); a[2] = Math.max(a[2], r.s[i]); a[3] = Math.max(a[3], r.s[i + 1]);
       }
-      parrots = new Parrots(world.enu2px, a);
+      parrots = new Parrots(world.enu2px, a, 10); // denser flocks over Rome centro
     }
     Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: parrots, __planes: planes });
   });
@@ -186,6 +196,43 @@ function drawBorders(dpr: number) {
   }
 }
 
+/** Monument / piazza labels for the current city (always on at street-level zoom). */
+function drawLandmarks(dpr: number, pxPerArt: number) {
+  const list = LANDMARKS[document.body.dataset.city!] ?? [];
+  if (!list.length) return;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  const placed: Array<[number, number, number, number]> = [];
+  for (const lm of list) {
+    if (pxPerArt < (lm.minPx ?? 0.08)) continue;
+    // Pin at ground / plinth height — h=55 floated labels ~150 art-px off the footprint
+    const [gx, gy] = llhToPixel(lm.lat, lm.lon, lm.pinH ?? 12);
+    const [sx, sy] = toScreen(gx, gy);
+    const size = Math.max(11, Math.min(15, 12 * dpr)) ;
+    ctx.font = `600 ${size}px ui-sans-serif, system-ui, sans-serif`;
+    const tw = ctx.measureText(lm.name).width + 10 * dpr, th = size + 6 * dpr;
+    const box: [number, number, number, number] = [sx - tw / 2, sy - th - 10 * dpr, sx + tw / 2, sy - 2 * dpr];
+    if (placed.some((q) => box[0] < q[2] && box[2] > q[0] && box[1] < q[3] && box[3] > q[1])) continue;
+    placed.push(box);
+    // pin
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(20, 22, 28, 0.85)";
+    ctx.arc(sx, sy - 2 * dpr, 3.2 * dpr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff8e7";
+    ctx.beginPath();
+    ctx.arc(sx, sy - 2 * dpr, 1.6 * dpr, 0, Math.PI * 2);
+    ctx.fill();
+    // label chip
+    const lx = sx, ly = sy - 8 * dpr;
+    ctx.lineWidth = 3 * dpr;
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.fillStyle = "#fff";
+    ctx.strokeText(lm.name, lx, ly);
+    ctx.fillText(lm.name, lx, ly);
+  }
+}
+
 let lastT = performance.now();
 function frame(t: number) {
   const dpr = window.devicePixelRatio || 1;
@@ -200,7 +247,7 @@ function frame(t: number) {
   // zoomed out too far to see them (their draw() thresholds), cars and cats pause instead of
   // simulating thousands of invisible movers every frame
   const px = k / dpr;
-  if (traffic && showTraffic && px >= 0.14) {
+  if (traffic && showTraffic && px >= 0.28) {
     traffic.step(dt);
     traffic.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
@@ -212,7 +259,8 @@ function frame(t: number) {
     if (parrots) { parrots.step(dt); parrots.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]); }
     if (planes) { planes.step(dt); planes.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]); }
   }
-  if (showBorders || k / dpr < 0.05) drawBorders(dpr); // borders appear automatically far out
+  if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview
+  if (px >= 0.06) drawLandmarks(dpr, px); // monumenti principali when zoomed in enough
   lastT = t;
   requestAnimationFrame(frame);
 }
@@ -259,41 +307,69 @@ if (preview) {
 //   ?at=lat,lon[,km]    a place, with the screen width in km (default 1.5)
 //   #metro              the whole region with borders
 //   otherwise           the page's city (centre + width from places.ts)
+/** Ready-map rectangle in global art px (painted tiles, else city opening frame). */
+let playableRect: [[number, number], [number, number]] | null = null;
+
 viewer.addOnceHandler("open", () => {
   base().addOnceHandler("fully-loaded-change", () => { loadAnimations(); hidePreview(false); }); // first view's tiles are drawn
-  const [[y0, x0], [y1, x1]] = world.bounds;
-  // never zoom out past the whole metro (all city borders) with a small margin
-  let mx0 = x0, my0 = y0, mx1 = x1, my1 = y1;
-  for (const c of borders) for (const r of c.rings) for (const [y, x] of r) { mx0 = Math.min(mx0, x); mx1 = Math.max(mx1, x); my0 = Math.min(my0, y); my1 = Math.max(my1, y); }
-  const ma = globalToViewport(mx0, my0), mb = globalToViewport(mx1, my1);
-  const metro = new OpenSeadragon.Rect(ma.x, ma.y, mb.x - ma.x, mb.y - ma.y);
-  const vpw = viewer.viewport.getContainerSize();
-  const fitZoom = Math.min(1 / (metro.width * 1.1), (vpw.y / vpw.x) / (metro.height * 1.1));
-  Object.assign(viewer.viewport, { minZoomLevel: fitZoom }); // runtime option, missing from typings
+  const [[by0, bx0], [by1, bx1]] = world.bounds;
+  // Prefer painted AABB; otherwise a box around the city opening view (never the whole metro).
+  if (world.playable) {
+    playableRect = world.playable;
+  } else {
+    const [cx, cy] = llhToPixel(city.center[0], city.center[1], 25);
+    const half = (city.widthM / CAMERA.mpp) / 2;
+    playableRect = [[cy - half, cx - half], [cy + half, cx + half]];
+  }
+  // Clamp inside ready map (no soft edge pad — vignette / sfocato was removed).
+  const pad = 24;
+  let [[py0, px0], [py1, px1]] = playableRect;
+  px0 = Math.max(bx0, px0 - pad); py0 = Math.max(by0, py0 - pad);
+  px1 = Math.min(bx1, px1 + pad); py1 = Math.min(by1, py1 + pad);
+  playableRect = [[py0, px0], [py1, px1]];
+
+  // OSD zoom = imageWidth / visibleArtPx. Never let visible width exceed the ready map
+  // (and never more than ~city opening width) — that was the "tiny diamond in black void".
+  const playW = Math.max(1, px1 - px0), playH = Math.max(1, py1 - py0);
+  const maxViewPx = Math.min(playW, playH, city.widthM / CAMERA.mpp) * 0.98;
+  const imgW = base().getContentSize().x;
+  const fitZoom = imgW / maxViewPx;
+  Object.assign(viewer.viewport, { minZoomLevel: fitZoom });
+
+  const zoomForWidthM = (widthM: number) => Math.max(fitZoom, imgW / (widthM / CAMERA.mpp));
 
   const at = location.hash.match(/^#@(-?[\d.]+),(-?[\d.]+),([\d.]+)$/);
   const ll = new URLSearchParams(location.search).get("at")?.split(",").map(Number);
   /** centre on lat/lon with `widthM` metres across the screen */
   const show = (lat: number, lon: number, widthM: number) => {
     const [x, y] = llhToPixel(lat, lon, 25), vp = viewer.viewport;
-    vp.zoomTo(base().getContentSize().x / (widthM / CAMERA.mpp), undefined, true);
+    vp.zoomTo(zoomForWidthM(widthM), undefined, true);
     vp.panTo(globalToViewport(x, y), true);
   };
-  if (at) {
+  // Ignore stale deep-link zooms that would open past the ready-map min
+  if (at && Number(at[3]) >= fitZoom * 0.95) {
     viewer.viewport.panTo(globalToViewport(Number(at[1]), Number(at[2])), true);
-    viewer.viewport.zoomTo(Number(at[3]), undefined, true);
+    viewer.viewport.zoomTo(Math.max(fitZoom, Number(at[3])), undefined, true);
   } else if (ll && ll.length >= 2 && ll.slice(0, 3).every(Number.isFinite)) {
     show(ll[0], ll[1], (ll[2] ?? 1.5) * 1000);
-  } else if (location.hash === "#metro") {
-    showBorders = true;
-    viewer.viewport.fitBounds(metro, true);
   } else {
-    show(city.center[0], city.center[1], city.widthM);
+    show(city.center[0], city.center[1], Math.min(city.widthM, 2200));
   }
+
+  // Keep the centre inside the ready map while panning / zooming out
+  const clampCenter = () => {
+    const vp = viewer.viewport;
+    if (vp.getZoom(true) < fitZoom * 0.999) vp.zoomTo(fitZoom, undefined, true);
+    const c = base().viewportToImageCoordinates(vp.getCenter(true));
+    const gx = Math.min(px1, Math.max(px0, c.x + ox));
+    const gy = Math.min(py1, Math.max(py0, c.y + oy));
+    if (Math.abs(gx - (c.x + ox)) > 1 || Math.abs(gy - (c.y + oy)) > 1) {
+      vp.panTo(globalToViewport(gx, gy), true);
+    }
+  };
+  viewer.addHandler("animation", clampCenter);
   viewer.addHandler("animation-finish", () => {
-    // fully zoomed out: settle on the metro instead of wherever the cursor was
-    if (viewer.viewport.getZoom() <= fitZoom * 1.03) viewer.viewport.panTo(metro.getCenter());
-    if (location.hash === "#metro") return;
+    clampCenter();
     const c = base().viewportToImageCoordinates(viewer.viewport.getCenter(true));
     history.replaceState(null, "", `#@${Math.round(c.x + ox)},${Math.round(c.y + oy)},${viewer.viewport.getZoom(true).toFixed(2)}`);
   });

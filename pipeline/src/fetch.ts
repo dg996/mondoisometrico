@@ -59,20 +59,35 @@ async function arcgis(layer: number, bbox: [number, number, number, number], fie
   return { type: "FeatureCollection", features: [...seen.values()] };
 }
 
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+];
+
 async function overpass(query: string) {
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    const r = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST", headers: { ...UA, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ data: query }),
-    });
-    if (r.ok) return r.json();
-    console.warn(`  overpass ${r.status}, retrying…`);
-    await new Promise((res) => setTimeout(res, 15_000 * attempt));
+  let last = "";
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    const url = OVERPASS[(attempt - 1) % OVERPASS.length];
+    try {
+      const r = await fetch(url, {
+        method: "POST", headers: { ...UA, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ data: query }),
+        signal: AbortSignal.timeout(180_000),
+      });
+      if (r.ok) return r.json();
+      last = `${r.status} ${url}`;
+      console.warn(`  overpass ${r.status} (${new URL(url).host}), retrying…`);
+    } catch (err) {
+      last = `${err} ${url}`;
+      console.warn(`  overpass error (${new URL(url).host}), retrying…`);
+    }
+    await new Promise((res) => setTimeout(res, 5_000 * attempt));
   }
-  throw new Error("overpass failed");
+  throw new Error(`overpass failed: ${last}`);
 }
 
-const name = process.argv[2] ?? "pantheon";
+const name = process.argv[2] ?? "roma-core";
 const area = openArea(name);
 const dir = join(RAW, name);
 mkdirSync(dir, { recursive: true });
@@ -94,8 +109,16 @@ if (!existsSync(join(dir, "tlv_canopy.geojson"))) {
 if (!existsSync(join(dir, "osm.json"))) {
   const [s, w, n, e] = area.bbox;
   const b = `(${s},${w},${n},${e})`;
+  // buildings + trees; also fountains / named monuments without building=* (Fontana di Trevi, etc.)
   const data = await overpass(`[out:json][timeout:300];
-(way["building"]${b}; relation["building"]${b}; node["natural"="tree"]${b};);
+(
+  way["building"]${b};
+  relation["building"]${b};
+  node["natural"="tree"]${b};
+  nwr["amenity"="fountain"]${b};
+  nwr["historic"~"^(monument|memorial|ruins|archaeological_site|castle|citywalls)$"]${b};
+  nwr["tourism"="attraction"]["name"]${b};
+);
 out body geom;`);
   writeFileSync(join(dir, "osm.json"), JSON.stringify(data));
   console.log(`  osm: ${data.elements.length} elements`);
@@ -109,9 +132,10 @@ out body geom;`);
   console.log(`  roads: ${data.elements.length} ways`);
 }
 if (!existsSync(join(dir, "ground.json"))) {
-  const [s, w, n, e] = area.bbox, m = 0.02;
+  // Smaller margin for Rome test patches keeps Overpass under rate/size limits.
+  const [s, w, n, e] = area.bbox, m = area.region === "roma-centro" ? 0.005 : 0.02;
   const b = `(${s - m},${w - m},${n + m},${e + m})`;
-  const data = await overpass(`[out:json][timeout:600][maxsize:1073741824];
+  const data = await overpass(`[out:json][timeout:300][maxsize:536870912];
 (
   way["highway"]["tunnel"!~"yes|building_passage"]${b};
   way["area:highway"]${b};
@@ -121,9 +145,10 @@ if (!existsSync(join(dir, "ground.json"))) {
   nwr["natural"~"^(water|beach|sand|scrub|grassland|wood|wetland|coastline|bare_rock|heath)$"]${b};
   nwr["water"]${b};
   nwr["waterway"="riverbank"]${b};
-  nwr["amenity"~"^(parking|school|university|college|hospital|grave_yard)$"]${b};
+  nwr["amenity"~"^(parking|school|university|college|hospital|grave_yard|fountain)$"]${b};
   nwr["man_made"~"^(pier|breakwater|groyne|bridge)$"]${b};
   nwr["place"="square"]${b};
+  nwr["tourism"="attraction"]["name"]${b};
 );
 out body geom;`);
   writeFileSync(join(dir, "ground.json"), JSON.stringify(data));

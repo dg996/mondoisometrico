@@ -1,7 +1,7 @@
 /**
- * Life above the roofs: now and then an airliner comes in from the sea on the approach to
- * the region's airport (Ben Gurion, runway 12, in Israel Center; ~3° glide slope) and fades out inland, and a few small flocks of green
- * rose-ringed parakeets (Tel Aviv's famous feral parrots) dart about over the streets.
+ * Life above the roofs: airliners on approach to the region's airport (when the corridor
+ * crosses the map) plus scenic overflights across the painted city so centro always sees
+ * planes; and flocks of green parakeets over the streets.
  * Drawn on the overlay canvas in a local frame projected like the cars (x forward, y side, z up).
  */
 type Vec3 = [number, number, number];
@@ -11,28 +11,82 @@ import { ecefToEnu, llhToEcef } from "../../../pipeline/src/camera.ts";
 
 /** The region's airport: runway threshold and heading (places.ts, passed on in world.json). */
 export interface Airport { lat: number; lon: number; runwayHeadingDeg: number }
-const START = 22000, END = 7000;        // metres before the threshold: over the sea → over Ramat Gan
+const START = 22000, END = 7000;        // metres before the threshold on final approach
 const FADE = 2500, SPEED = 75, EVERY = 110, GLIDE = Math.tan((3 * Math.PI) / 180);
+/** Scenic overflights: varied headings/offsets across the city centre. */
+const FLY_LEN = 16000, FLY_EVERY = 55;
+/** Hide planes when zoomed out this far (canvas px per art px) — avoids sky-whales. */
+const MIN_PX = 0.055;
+
+interface Flyover {
+  s: number;              // distance flown (m)
+  origin: [number, number];
+  dir: [number, number];
+  alt: number;
+  len: number;
+  speed: number;
+}
 
 /** projector + local frame (forward d, z up), scaled, as a canvas transform setter */
 function frame(ctx: CanvasRenderingContext2D, M: number[][], toScreen: ToScreen, p: Vec3, d: [number, number], scale: number) {
   const proj = (q: Vec3) => toScreen(M[0][0] * q[0] + M[0][1] * q[1] + M[0][2] * q[2], M[1][0] * q[0] + M[1][1] * q[1] + M[1][2] * q[2]);
-  const o = proj(p), f = proj([p[0] + d[0], p[1] + d[1], p[2]]), s = proj([p[0] + d[1], p[1] - d[0], p[2]]);
-  const ex = [(f[0] - o[0]) * scale, (f[1] - o[1]) * scale], ey = [(s[0] - o[0]) * scale, (s[1] - o[1]) * scale];
-  return { o, set: () => ctx.setTransform(ex[0], ex[1], ey[0], ey[1], o[0], o[1]) };
+  // Normalise heading — a near-zero dir collapses the basis and stretches nav-lights into
+  // infinite vertical red streaks across the map.
+  const L = Math.hypot(d[0], d[1]) || 1;
+  const dx = d[0] / L, dy = d[1] / L;
+  const o = proj(p), f = proj([p[0] + dx, p[1] + dy, p[2]]), s = proj([p[0] + dy, p[1] - dx, p[2]]);
+  let ex: [number, number] = [(f[0] - o[0]) * scale, (f[1] - o[1]) * scale];
+  let ey: [number, number] = [(s[0] - o[0]) * scale, (s[1] - o[1]) * scale];
+  const lx = Math.hypot(ex[0], ex[1]), ly = Math.hypot(ey[0], ey[1]);
+  // Reject / repair degenerate frames (parallel screen axes or near-zero) that paint streaks.
+  if (lx < 1e-3 || ly < 1e-3 || !Number.isFinite(lx + ly)) {
+    return { o, set: null as (() => void) | null, meter: lx, bad: true as const };
+  }
+  // Cap axis length so a bad scale never draws kilometre-long wing chords
+  const CAP = 80;
+  if (lx > CAP) { ex = [ex[0] * CAP / lx, ex[1] * CAP / lx]; }
+  if (ly > CAP) { ey = [ey[0] * CAP / ly, ey[1] * CAP / ly]; }
+  return { o, set: () => ctx.setTransform(ex[0], ex[1], ey[0], ey[1], o[0], o[1]), meter: lx, bad: false as const };
 }
 
 const inView = (o: [number, number], view: number[], m: number) => o[0] > view[0] - m && o[1] > view[1] - m && o[0] < view[2] + m && o[1] < view[3] + m;
 
 export class Planes {
-  private t = EVERY - 6; // first one shortly after load
-  private flights: number[] = []; // distance flown (m) per plane in the air
+  private t = EVERY - 6; // first approach shortly after load
+  private flyT = FLY_EVERY - 8;
+  private flights: number[] = []; // distance flown (m) on final approach
+  private flyovers: Flyover[] = [];
   private threshold: [number, number]; // runway threshold in the region's ENU metres
   private dir: [number, number];
-  constructor(private M: number[][], airport: Airport) {
+  private center: [number, number];
+  private seed = 17;
+  constructor(private M: number[][], airport: Airport, overflightCenter?: [number, number]) {
     const p = ecefToEnu(llhToEcef(airport.lat, airport.lon, 0)), a = (airport.runwayHeadingDeg * Math.PI) / 180;
     this.threshold = [p[0], p[1]];
     this.dir = [Math.sin(a), Math.cos(a)];
+    this.center = overflightCenter ?? [0, 0];
+  }
+
+  private rnd() { this.seed = (this.seed * 16807) % 2147483647; return this.seed / 2147483647; }
+
+  /** Spawn a scenic overflight on a fresh heading/offset so paths don't repeat. */
+  private spawnFlyover() {
+    // Prefer routes that cross the city: NE–SW and NW–SE diagonals, plus slight jitter
+    const base = [Math.PI / 4, -Math.PI / 4, Math.PI / 2, 0, Math.PI / 6, -Math.PI / 3][Math.floor(this.rnd() * 6)];
+    const h = base + (this.rnd() - 0.5) * 0.35;
+    const dir: [number, number] = [Math.sin(h), Math.cos(h)];
+    const side: [number, number] = [dir[1], -dir[0]];
+    const lateral = (this.rnd() - 0.5) * 3500; // up to ±1.75 km off the city centre
+    const len = FLY_LEN * (0.85 + this.rnd() * 0.3);
+    const origin: [number, number] = [
+      this.center[0] - dir[0] * (len / 2) + side[0] * lateral,
+      this.center[1] - dir[1] * (len / 2) + side[1] * lateral,
+    ];
+    this.flyovers.push({
+      s: 0, origin, dir, len,
+      alt: 650 + this.rnd() * 700,          // 650–1350 m
+      speed: SPEED * (0.85 + this.rnd() * 0.35),
+    });
   }
 
   step(dt: number) {
@@ -40,29 +94,56 @@ export class Planes {
     this.t += dt;
     if (this.t >= EVERY) { this.t = 0; this.flights.push(0); }
     this.flights = this.flights.map((s) => s + SPEED * dt).filter((s) => s < START - END);
+    this.flyT += dt;
+    if (this.flyT >= FLY_EVERY) { this.flyT = 0; this.spawnFlyover(); }
+    this.flyovers = this.flyovers
+      .map((f) => ({ ...f, s: f.s + f.speed * dt }))
+      .filter((f) => f.s < f.len);
   }
 
   draw(ctx: CanvasRenderingContext2D, toScreen: ToScreen, px: number, view: number[]) {
+    if (px < MIN_PX) return; // zoomed out too far: hide rather than inflate
     for (const s of this.flights) {
-      const left = START - s; // metres to the threshold
+      const left = START - s;
       const B = this.threshold, DIR = this.dir;
       const p: Vec3 = [B[0] - DIR[0] * left, B[1] - DIR[1] * left, 30 + left * GLIDE];
-      const alpha = Math.min(1, s / FADE, (START - END - s) / FADE);
-      const scale = Math.max(1, 0.12 / px); // never smaller than ~20 screen px across
-      // shadow on the ground (sun high in the south-west), then the plane itself
-      const sh = frame(ctx, this.M, toScreen, [p[0] + p[2] * 0.25, p[1] + p[2] * 0.35, 0], DIR, scale);
-      const pl = frame(ctx, this.M, toScreen, p, DIR, scale);
-      if (!inView(pl.o, view, 400) && !inView(sh.o, view, 400)) continue;
-      ctx.globalAlpha = alpha * 0.18; sh.set(); this.shape(ctx, "#000", "#000", "#000");
-      ctx.globalAlpha = alpha; pl.set(); this.shape(ctx, "#f4f5f7", "#c9ced6", "#8a93a0");
-      // nav lights: red port, green starboard, white strobe on the tail
-      const blink = (performance.now() % 1200) < 120;
-      ctx.fillStyle = "#ff3b30"; ctx.fillRect(-2, -17.6, 1.2, 1.2);
-      ctx.fillStyle = "#34c759"; ctx.fillRect(-2, 16.4, 1.2, 1.2);
-      if (blink) { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(-19, 0, 1.6, 0, Math.PI * 2); ctx.fill(); }
-      ctx.globalAlpha = 1;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.drawOne(ctx, toScreen, px, view, p, DIR, Math.min(1, s / FADE, (START - END - s) / FADE));
     }
+    for (const f of this.flyovers) {
+      const O = f.origin, DIR = f.dir;
+      const p: Vec3 = [O[0] + DIR[0] * f.s, O[1] + DIR[1] * f.s, f.alt];
+      this.drawOne(ctx, toScreen, px, view, p, DIR, Math.min(1, f.s / FADE, (f.len - f.s) / FADE));
+    }
+  }
+
+  private drawOne(ctx: CanvasRenderingContext2D, toScreen: ToScreen, px: number, view: number[],
+    p: Vec3, DIR: [number, number], alpha: number) {
+    if (alpha <= 0.02) return;
+    // True world scale (shape units ≈ metres). Cap on-screen wingspan so zoom-out never
+    // makes a giant; slight floor when very zoomed in so it stays readable.
+    const probe = frame(ctx, this.M, toScreen, p, DIR, 1);
+    if (probe.bad) return;
+    const meterPx = Math.max(1e-6, probe.meter); // canvas px per ENU metre
+    const wingM = 36; // drawn wingspan in shape units
+    const natural = wingM * meterPx;
+    const MAX_SPAN = 52, MIN_SPAN = 14;
+    let scale = 1;
+    if (natural > MAX_SPAN) scale = MAX_SPAN / natural;
+    else if (natural < MIN_SPAN) scale = MIN_SPAN / natural;
+    scale = Math.min(1.25, scale); // never enlarge more than 25% — zoom-out stays small
+
+    const sh = frame(ctx, this.M, toScreen, [p[0] + p[2] * 0.25, p[1] + p[2] * 0.35, 0], DIR, scale);
+    const pl = frame(ctx, this.M, toScreen, p, DIR, scale);
+    if (pl.bad || sh.bad || (!inView(pl.o, view, 400) && !inView(sh.o, view, 400))) return;
+    ctx.globalAlpha = alpha * 0.18; sh.set!(); this.shape(ctx, "#000", "#000", "#000");
+    ctx.globalAlpha = alpha; pl.set!(); this.shape(ctx, "#f4f5f7", "#c9ced6", "#8a93a0");
+    const blink = (performance.now() % 1200) < 120;
+    // Nav lights as arcs (fillRect under a skew transform drew infinite red streaks)
+    ctx.fillStyle = "#ff3b30"; ctx.beginPath(); ctx.arc(-2, -17.6, 0.9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#34c759"; ctx.beginPath(); ctx.arc(-2, 16.4, 0.9, 0, Math.PI * 2); ctx.fill();
+    if (blink) { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(-19, 0, 1.6, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   /** narrow-body airliner from above, ~38 m long and 36 m across, nose at +x */
@@ -133,8 +214,10 @@ export class Parrots {
       for (const [bx, by, bz, ph] of f.birds) {
         const wob = Math.sin(now * 1.3 + ph) * 1.5;
         const p: Vec3 = [f.p[0] + d[0] * bx + d[1] * (by + wob), f.p[1] + d[1] * bx - d[0] * (by + wob), f.p[2] + bz];
-        const bird = frame(ctx, this.M, toScreen, p, d, 8 / Math.min(1, px)); // ≥ 8× life size, or a parakeet is a speck
-        if (!inView(bird.o, view, 30)) continue;
+        // Cap bird size on zoom-out the same way as planes (old 8/px exploded when zoomed out)
+        const boost = Math.min(8, 8 / Math.max(px, 0.5));
+        const bird = frame(ctx, this.M, toScreen, p, d, boost);
+        if (bird.bad || !bird.set || !inView(bird.o, view, 30)) continue;
         bird.set();
         const flap = Math.sin(now * 22 + ph * 5); // fast parakeet wingbeats
         ctx.fillStyle = "#3fae3a";

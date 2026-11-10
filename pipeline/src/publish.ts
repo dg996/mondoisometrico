@@ -89,11 +89,32 @@ await Promise.all(Array.from({ length: 8 }, async () => {
     if (++done % 200 === 0) process.stdout.write(`\r  ${done}/${files.length} · ${((Date.now() - t0) / 1000).toFixed(0)} s`);
   }
 }));
-for (const f of dataFiles) { await put(f); done++; }
+// Upload data files except world.json first; world.json last and only if every named file is present.
+const worldRel = dataFiles.find((f) => f.endsWith("world.json"));
+const dataFirst = dataFiles.filter((f) => f !== worldRel);
+for (const f of dataFirst) { await put(f); done++; }
+if (worldRel) {
+  const world = JSON.parse(readFileSync(join(dir, worldRel), "utf8")) as { files?: Record<string, string>; previews?: Record<string, Record<string, { file: string }>> };
+  const needed = new Set<string>();
+  for (const name of Object.values(world.files ?? {})) needed.add(`data/${name}`);
+  for (const city of Object.values(world.previews ?? {}))
+    for (const p of Object.values(city)) if (p?.file) needed.add(p.file);
+  const have = new Set(files);
+  const missing = [...needed].filter((f) => !have.has(f));
+  if (missing.length) {
+    throw new Error(`world.json references files not in this publish (would 404 live): ${missing.join(", ")}`);
+  }
+  // Also require the referenced objects to already be on R2 (or just uploaded above).
+  for (const f of needed) {
+    const probe = await fetch(`${HOSTING.origin}/regions/${region}/${f}?check=${Date.now()}`);
+    if (!probe.ok) throw new Error(`ref ${f} not reachable on R2 (${probe.status}) — aborting world.json upload`);
+  }
+  await put(worldRel); done++;
+}
 console.log(`\r  ${done}/${files.length} uploaded and checked in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 
 // spot check through the public domain (what the site loads)
-const probe = dataFiles.find((f) => f.endsWith("world.json")) ?? tileFiles[0];
+const probe = worldRel ?? tileFiles[0];
 const r = await fetch(`${HOSTING.origin}/regions/${region}/${probe}?check=${Date.now()}`);
 if (!r.ok) throw new Error(`${HOSTING.origin}/regions/${region}/${probe}: ${r.status} (uploaded, cache kept)`);
 console.log(`  ${HOSTING.origin}/regions/${region}/${probe}: ${r.status}`);

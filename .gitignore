@@ -18,3 +18,7 @@ web/public/regions/
 *.log
 .DS_Store
 .idea/
+
+# Agent skills (local)
+.agents/
+.vercel

@@ -10,9 +10,24 @@ export interface Area {
 
 export const AREAS: Record<string, Area> = {
   /**
-   * Small ~800 m test patch: Pantheon, Piazza della Rotonda, toward Piazza Navona.
-   * Paint and review this first before expanding to a full centro-storico area.
+   * Roma centro storico ampio: Vaticano → Termini, Villa Borghese → Testaccio/Aventino.
+   * ~3.5 km × 5 km — first painted body while wider rings render.
    */
+  "roma-core": {
+    title: "Roma · Centro",
+    region: "roma-centro",
+    bbox: [41.882, 12.452, 41.912, 12.512],
+  },
+  /**
+   * Anello urbano intorno al centro: Prati/Trastevere → San Giovanni, Parioli → Ostiense.
+   * Complements roma-core (export merges tiles; overlapping centres keep the painted core).
+   */
+  "roma-inner": {
+    title: "Roma · Città",
+    region: "roma-centro",
+    bbox: [41.860, 12.420, 41.935, 12.545],
+  },
+  /** Small pilot patch (kept for quick tests). */
   pantheon: {
     title: "Pantheon · Piazza Navona",
     region: "roma-centro",

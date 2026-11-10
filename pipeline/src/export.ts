@@ -6,7 +6,7 @@
  * All areas must belong to one region. Only files that differ from what is published (R2) are
  * written, into the local cache data/web/regions/<region>/ (served by `npm run dev` over production;
  * `npm run publish -- <region>` uploads and empties it):
- *   tiles/map/{z}/{x}/{y}.avif         painted tiles where available, 3D render elsewhere
+ *   tiles/map/{z}/{x}/{y}.avif         painted tiles where available; unpainted render is fogged
  *   tiles/photo/{z}/{x}/{y}.avif       3D render only (toggle)
  *   data/world.json                    camera, bounds, tile origin, ENU→pixel map, attributions, and
  *                                      the names of the files below (the only mutable file)
@@ -48,6 +48,51 @@ let outlines: Array<Array<[number, number]>> = [];
 /** web/src/pages/index.astro #map background (#0e0f12): the edge fades into it */
 const BG = [14, 15, 18];
 const edgeDistance = (x: number, y: number) => Math.max(0, ...outlines.map((o) => insideDistance([x, y], o)));
+
+/**
+ * Unpainted (3D-render) map tiles stay visible but fogged toward the page background so the
+ * AI-painted islands read clearly. Soft band blends into neighbouring painted art tiles.
+ * Bump RAW_DIM_TAG after changing these so export rewrites the affected tiles.
+ */
+const RAW_KEEP = 0.04;   // unpainted → nearly solid page BG (kill milky “sfocato”)
+const RAW_FEATHER = 24;  // hard cut into painted art — no blurry halo
+const RAW_DIM_TAG = "rawdim4";
+/** Art-tile keys (`tx_ty`) that have a paint/*.png — set in main before exportLayer("map"). */
+let paintedArt = new Set<string>();
+
+/** How much colour to keep at global art px (1 = full paint, RAW_KEEP = fogged render). */
+function paintKeep(gx: number, gy: number): number {
+  const T = CAMERA.tile;
+  const ax = Math.floor(gx / T), ay = Math.floor(gy / T);
+  if (paintedArt.has(key(ax, ay))) return 1;
+  let best = Infinity;
+  // only nearby painted tiles matter for the feather
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    if (!paintedArt.has(key(ax + dx, ay + dy))) continue;
+    const px = (ax + dx) * T, py = (ay + dy) * T;
+    const ddx = gx < px ? px - gx : gx > px + T ? gx - (px + T) : 0;
+    const ddy = gy < py ? py - gy : gy > py + T ? gy - (py + T) : 0;
+    best = Math.min(best, Math.hypot(ddx, ddy));
+  }
+  if (!Number.isFinite(best) || best >= RAW_FEATHER) return RAW_KEEP;
+  const t = 1 - best / RAW_FEATHER;
+  const s = t * t * (3 - 2 * t);
+  return RAW_KEEP + (1 - RAW_KEEP) * s;
+}
+
+/** Fog unpainted map pixels toward BG (lattice + bilinear, same idea as edgeAlpha). */
+function dimUnpainted(rgb: Buffer, x0: number, y0: number) {
+  const step = 8, n = TS / step + 1, grid = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) grid[j * n + i] = paintKeep(x0 + i * step, y0 + j * step);
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+    const gx = x / step, gy = y / step, i = Math.floor(gx), j = Math.floor(gy), fx = gx - i, fy = gy - j;
+    const keep = (grid[j * n + i] * (1 - fx) + grid[j * n + i + 1] * fx) * (1 - fy)
+      + (grid[(j + 1) * n + i] * (1 - fx) + grid[(j + 1) * n + i + 1] * fx) * fy;
+    if (keep >= 0.999) continue;
+    const p = y * TS + x;
+    for (let c = 0; c < 3; c++) rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * keep);
+  }
+}
 
 /** Native web tile at global art px (x0, y0): fade alpha near the map edge (null = fully inside). */
 function edgeAlpha(x0: number, y0: number): Buffer | null {
@@ -112,7 +157,7 @@ async function readTile(layer: string, z: number, x: number, y: number): Promise
  */
 type Deck = { y: number; w: number; m: number; pts: Array<[number, number]>; box: number[] };
 let decks: Deck[] = [];
-const DECK_STYLE = "decks1"; // bump to re-export painted tiles after changing the deck drawing
+const DECK_STYLE = "decks3"; // bump to re-export painted tiles after changing the deck drawing
 function bridgeDecks(ways: Array<{ y: number; w: number; l: number; s: number[] }>) {
   decks = [];
   for (const w of ways) {
@@ -178,7 +223,9 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
   for (const [k, file] of sources) {
     const [tx, ty] = parse(k);
     const painted = layer === "map" && file.includes("/paint/");
-    const m = statSync(file).mtimeMs, stamp = `${file}@${m}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : ""}@${FORMAT}${QUALITY}`;
+    const m = statSync(file).mtimeMs;
+    // RAW_DIM_TAG forces a rewrite of unpainted map tiles when the fog strength changes
+    const stamp = `${file}@${m}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : `@${RAW_DIM_TAG}`}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
@@ -191,6 +238,8 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
           const svg = painted ? deckSvg(x * TS, y * TS) : null;
           if (svg) img = sharp(await img.png().toBuffer()).composite([{ input: svg }]);
           const rgb = await img.removeAlpha().raw().toBuffer();
+          // fog geometric render so only AI-painted buildings read as "done"
+          if (layer === "map" && !painted) dimUnpainted(rgb, x * TS, y * TS);
           const alpha = edgeAlpha(x * TS, y * TS);
           // fade baked toward the page background: opaque tiles, so no seams where tiles meet
           if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
@@ -353,7 +402,8 @@ async function exportRoads(areas: string[], heights: Heights) {
             const f2 = k / n, lat = a0.lat + (b0.lat - a0.lat) * f2, lon = a0.lon + (b0.lon - a0.lon) * f2;
             const g = await onGround(heights, lat, lon);
             const surf = heights.at(g.x, g.y);
-            const vis = surf === null || surf <= g.h + 2.5 ? 1 : 0; // bridges are drawn at ground level
+            // Tight occlusion: cars must not sit on rooftops when the heightmap rises above the road.
+            const vis = surf === null || surf <= g.h + 1.0 ? 1 : 0;
             total++; occluded += 1 - vis;
             const e = ecefToEnu(llhToEcef(lat, lon, g.h));
             samples.push(Math.round(e[0] * 10) / 10, Math.round(e[1] * 10) / 10, Math.round(e[2] * 10) / 10, vis);
@@ -369,6 +419,15 @@ async function exportRoads(areas: string[], heights: Heights) {
     }
   }
   occluded += hideUnderBridges(ways);
+  // Untagged Tiber crossings still follow the riverbed DEM — promote + flatten so decks stay level.
+  promoteRiverCrossings(ways);
+  // Bridges: DEM dips into the river under the deck → curved roads + cars in the water.
+  // Snap mid-span samples up to a flat deck between the bank approaches.
+  flattenBridgeDecks(ways);
+  // Ground roads that still plunge into a water trough (bad DEM / missing bridge tag): hide them.
+  occluded += hideWaterDips(ways);
+  // Any sample still far below its own way's bank heights (riverbed / floating) — never drive there.
+  occluded += hideBelowBanks(ways);
   // nothing drives or walks in the faded margin outside the painted map
   for (const w of ways) for (let k = 0; k < w.s.length; k += 4) {
     if (!w.s[k + 3]) continue;
@@ -407,6 +466,90 @@ function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a
     out.vis.push(runs.length, ...runs);
   }
   return out;
+}
+
+/**
+ * Ways that plunge into a riverbed mid-span (missing bridge=yes / layer) still need deck treatment.
+ */
+function promoteRiverCrossings(ways: Array<{ y: number; s: number[] }>) {
+  for (const w of ways) {
+    if (w.y > 0) continue;
+    const n = w.s.length / 4;
+    if (n < 6) continue;
+    const u0 = w.s[2], u1 = w.s[(n - 1) * 4 + 2];
+    const bank = Math.max(u0, u1);
+    let midMin = Infinity;
+    for (let i = Math.floor(n * 0.22); i < Math.ceil(n * 0.78); i++) midMin = Math.min(midMin, w.s[i * 4 + 2]);
+    if (bank - midMin > 3.5) w.y = 1;
+  }
+}
+
+/**
+ * Keep bridge decks level. Copernicus DEM follows the riverbed under Ponte Vittorio / etc., so
+ * sampling ground height along a bridge makes the road (and traffic) dive into the water.
+ */
+function flattenBridgeDecks(ways: Array<{ y: number; s: number[] }>) {
+  for (const w of ways) {
+    if (w.y <= 0) continue;
+    const n = w.s.length / 4;
+    if (n < 4) continue;
+    const band = Math.max(1, Math.floor(n * 0.15));
+    let h0 = -Infinity, h1 = -Infinity;
+    for (let i = 0; i < band; i++) h0 = Math.max(h0, w.s[i * 4 + 2]);
+    for (let i = n - band; i < n; i++) h1 = Math.max(h1, w.s[i * 4 + 2]);
+    if (!Number.isFinite(h0) || !Number.isFinite(h1)) continue;
+    // Flat deck at the higher approach (+1.2 m kerb), short ramps at the banks only.
+    const deck = Math.max(h0, h1) + 1.2;
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      let target = deck;
+      if (t < 0.12) target = h0 + (deck - h0) * (t / 0.12);
+      else if (t > 0.88) target = deck + (h1 - deck) * ((t - 0.88) / 0.12);
+      w.s[i * 4 + 2] = Math.round(Math.max(w.s[i * 4 + 2], target) * 10) / 10;
+    }
+  }
+}
+
+/** Hide ground-road samples that plunge >1.5 m below the chord between way ends (river / quarry dips). */
+function hideWaterDips(ways: Array<{ y: number; s: number[] }>) {
+  let n = 0;
+  for (const w of ways) {
+    if (w.y > 0) continue;
+    const m = w.s.length / 4;
+    if (m < 3) continue;
+    const u0 = w.s[2], u1 = w.s[(m - 1) * 4 + 2];
+    for (let i = 1; i < m - 1; i++) {
+      const chord = u0 + (u1 - u0) * (i / (m - 1));
+      if (w.s[i * 4 + 2] < chord - 1.5 && w.s[i * 4 + 3]) {
+        w.s[i * 4 + 3] = 0;
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+/**
+ * Hide samples sitting in a trough relative to the way's own approach heights.
+ * Catches river-bed samples that survive flatten (partial bridges, service tracks into water).
+ */
+function hideBelowBanks(ways: Array<{ s: number[] }>) {
+  let n = 0;
+  for (const w of ways) {
+    const m = w.s.length / 4;
+    if (m < 4) continue;
+    const band = Math.max(1, Math.floor(m * 0.2));
+    let bank = -Infinity;
+    for (let i = 0; i < band; i++) bank = Math.max(bank, w.s[i * 4 + 2]);
+    for (let i = m - band; i < m; i++) bank = Math.max(bank, w.s[i * 4 + 2]);
+    if (!Number.isFinite(bank)) continue;
+    for (let i = 0; i < m; i++) {
+      if (!w.s[i * 4 + 3]) continue;
+      // >2.5 m below bank approaches → in the river / under a collapsed DEM
+      if (w.s[i * 4 + 2] < bank - 2.5) { w.s[i * 4 + 3] = 0; n++; }
+    }
+  }
+  return n;
 }
 
 /**
@@ -549,7 +692,7 @@ let OUT = ""; // data/web/regions/<region>
 
 async function main() {
   const names = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const areas = names.length ? names : ["pantheon"];
+  const areas = names.length ? names : ["roma-core"];
   const regions = new Set(areas.map((a) => openArea(a).region));
   if (regions.size !== 1) throw new Error(`export one region at a time (got ${[...regions].join(", ")})`);
   OUT = join(WEB_CACHE, "regions", activeRegion());
@@ -577,7 +720,8 @@ async function main() {
   const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
   await exportRoads(areas, heights); // first: the bridge decks are drawn into the painted tiles
   if (!process.argv.includes("--data-only")) {
-    await exportLayer("map", new Map([...photo, ...art])); // painted wins
+    paintedArt = new Set(art.keys());
+    await exportLayer("map", new Map([...photo, ...art])); // painted wins; unpainted fogged
     await exportLayer("photo", photo);
     for (const layer of Object.keys(index)) writeData(`tiles-${layer}`, JSON.stringify(index[layer]));
   }
@@ -588,8 +732,18 @@ async function main() {
   const ox = Math.floor(x0 / block) * block, oy = Math.floor(y0 / block) * block;
   const { right: r, up: u } = axes();
   const m = CAMERA.mpp;
+  // Playable AABB = painted art tiles only (ready map). Viewer clamps pan/zoom here so you
+  // never pull back to a tiny diamond in a black void.
+  let py0 = Infinity, px0 = Infinity, py1 = -Infinity, px1 = -Infinity;
+  for (const k of art.keys()) {
+    const [tx, ty] = parse(k);
+    px0 = Math.min(px0, tx * CAMERA.tile); py0 = Math.min(py0, ty * CAMERA.tile);
+    px1 = Math.max(px1, (tx + 1) * CAMERA.tile); py1 = Math.max(py1, (ty + 1) * CAMERA.tile);
+  }
+  if (!Number.isFinite(px0)) { px0 = x0; py0 = y0; px1 = x1; py1 = y1; }
   const world = JSON.stringify({
     tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
+    playable: [[py0, px0], [py1, px1]],
     origin: [ox, oy], size: [Math.ceil((x1 - ox) / block) * block, Math.ceil((y1 - oy) / block) * block],
     // ENU meters -> art pixels (linear; ENU origin = pixel origin)
     enu2px: [[r[0] / m, r[1] / m, r[2] / m], [-u[0] / m, -u[1] / m, -u[2] / m]],
@@ -611,5 +765,6 @@ async function main() {
   const files = existsSync(OUT) ? readdirSync(OUT, { recursive: true }).filter((f) => String(f).match(/\.(avif|webp|json)$/)).length : 0;
   console.log(files ? `  ${files} files ready in ${OUT}\n  preview: npm run dev · publish: npm run publish -- ${activeRegion()}` : "  nothing changed");
 }
+
 
 main();

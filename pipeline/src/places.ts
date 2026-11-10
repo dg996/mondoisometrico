@@ -63,8 +63,8 @@ export const REGIONS: Record<string, Region> = {
 
 export const CITIES: Record<string, City> = {
   // Pantheon / Piazza della Rotonda — opening view of the historic centre
-  // Opening width matches the pantheon test patch (~800 m); widen when more areas are painted.
-  roma: { title: "Roma", region: "roma-centro", center: [41.8986, 12.4769], widthM: 700 },
+  // Opening view ~6.5 km across so the first frame reads as a city, not a single block
+  roma: { title: "Roma", region: "roma-centro", center: [41.8986, 12.4769], widthM: 6500 },
 };
 
 export const DEFAULT_CITY = "roma";

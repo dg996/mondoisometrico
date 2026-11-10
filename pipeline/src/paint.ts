@@ -7,7 +7,7 @@
  * into 1024px art tiles aligned with the render tiles.
  *
  *   npm run paint -- tlv-core --plan
- *   npm run paint -- tlv-core --window 4,-3
+ *   npm run paint -- tlv-core --window=4,-3     # use = form so negatives aren't flags
  *   npm run paint -- tlv-core --near 32.064,34.775 --radius 2   # a patch of windows
  *   npm run paint -- tlv-core -j 3                              # everything, centre first (--center lat,lon)
  */
@@ -18,6 +18,7 @@ import { parseArgs } from "node:util";
 import sharp, { type OverlayOptions } from "sharp";
 import { openArea } from "./areas.ts";
 import { CAMERA, llhToPixel } from "./camera.ts";
+import { LANDMARKS } from "./landmarks.ts";
 import { DERIVED, PIPELINE, readJson, writeAtomic } from "./paths.ts";
 import { SEA_H, readHeights } from "./heights.ts";
 import { applyRegistration, register } from "./register.ts";
@@ -28,47 +29,67 @@ const FEATHER = 64;
 const STYLE = join(PIPELINE, "style", "reference.png");
 const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
 const SEA = join(PIPELINE, "style", "sea.png");
-/** Minimum edge-map correlation between render and painted window (pilot range 0.58–0.90). */
-const MIN_MATCH = 0.45;
+/** Fork default 0.45; Rome OSM massing is noisier so we allow a touch lower but still reject mush. */
+const MIN_MATCH = 0.40;
 /** Below this share of strong edges in the render (sea, sand, empty lots) the match check is skipped. */
 const MIN_TEXTURE = 0.05;
 
-const PROMPT = `Use your image generation tool. Four images are attached:
+/** Same structure/quality bar as upstream isometricworld paint prompt, adapted to Rome. */
+const PROMPT = `Do these steps in order. Do not read skills docs, README, or any other files.
+
+1) Call view_image on ./input.png
+2) Call view_image on ./height.png
+3) Call view_image on ./style.png
+4) Call view_image on ./trees.png
+5) Call image_gen to EDIT input.png (input.png is the BASE — do not invent a new layout).
+
+Four images are attached:
 1. input.png: an orthographic aerial render (camera tilted 45° down, no perspective) of a simple 3D model \
-of {title}, Israel, built from map data. ~256 m across. The layout is exact; the colours are flat \
-placeholders (grey = asphalt with lane markings, pale = pavement/plaza, green = grass/park, sand = beach, \
-blue = water, brown dashes = rail, terracotta = bike path) and the window patterns are schematic hints. \
-Tree crowns are colour-coded by species (see image 4): dark green = ficus, light green = tipuana, \
-lilac = jacaranda in bloom, red-orange = flame tree, grey-green = olive, dark teal = Aleppo pine, \
-blue-green tall = eucalyptus, small crown on a thin brown trunk = date palm (shorter) or Washingtonia fan palm (taller).
+of {title}, Italy, built from map data. ~256 m across. The layout is exact; the colours are flat \
+placeholders (grey = asphalt with lane markings, pale = pavement/plaza, green = grass/park, \
+blue = water, brown dashes = rail) and the window patterns are schematic hints. \
+Tree crowns are colour-coded by species (see image 4).
 2. height.png: the height map from the SAME camera, pixel-aligned with image 1. Black = ground \
-(streets, squares, sea), grey→white = buildings and trees, brighter = taller. Use it to find exact \
+(streets, squares, river), grey→white = buildings and trees, brighter = taller. Use it to find exact \
 building footprints, edges and heights; open black areas are streets/plazas, not trees.
-3. style.png: the STYLE REFERENCE.
-4. trees.png: what each tree species looks like (Tel Aviv street and park trees), in the same style.
+3. style.png: the STYLE REFERENCE (same look as the upstream isometric world).
+4. trees.png: what each tree species looks like, in the same style.
 
 Redraw image 1 as detailed isometric pixel-art-style city illustration in EXACTLY the style of image 3: \
-clean crisp 3D blocks with straight vertical walls, every facade drawn with regular window grids and \
-balconies, flat roofs with rooftop details, saturated but natural colours, realistic varied trees \
-drawn as the species of image 4 seen from above (palms as star-shaped frond crowns with a visible trunk), smooth grey asphalt with lane markings, clean pavements, soft even daylight, light ambient \
-occlusion, no long shadows, no haze, no photographic noise.
+clean crisp 3D blocks with straight vertical walls, every facade drawn with regular window grids, \
+flat roofs with rooftop details, saturated but natural colours, realistic varied trees \
+drawn as the species of image 4 seen from above, smooth grey asphalt with lane markings, clean pavements, \
+soft even daylight, light ambient occlusion, no long shadows, no haze, no photographic noise.
 
 Geometry comes ONLY from images 1 and 2 — this is a tracing job:
 - Same orthographic camera, framing and scale: the output overlays image 1 pixel-for-pixel.
-- Every building keeps its exact footprint, position, height and roof outline. Draw believable Tel Aviv \
-materials: white/cream plaster Bauhaus blocks with rounded balconies, stone public buildings, glass towers, \
-real window grids, balconies, shutters, rooftop solar heaters and AC units. Tall towers stay tall. \
-Do not add, remove, merge or move buildings or trees; do not invent trees over open streets.
-- Streets, squares, parks, beach and sea stay exactly where they are; give them real texture \
-(pale grey/cream stone paving — not orange or terracotta —, crosswalks at junctions, grass, sand, water ripples, parked cars along kerbs only, \
-no cars in the driving lanes).
-- Layering is exactly as in image 1: where a road bridge crosses rail tracks, a river or another road, the \
-bridge deck is continuous and on top, and whatever passes underneath is hidden beneath it — never draw \
-rails or lane markings across a bridge deck.
+- Every building keeps its exact footprint, position, height and roof outline. Draw believable Rome \
+materials: ochre/cream/terracotta plaster blocks, brick and travertine public buildings, \
+real window grids, shutters, cornices, rooftop terraces and AC units. \
+CRITICAL building craft: each block is a solid orthographic prism — vertical walls meet roofs at crisp \
+right angles; no melted/warped facades, no roofs sliding off walls, no two buildings fused into one mass, \
+no floating grass patches. Neighbouring blocks stay separated by streets/courtyards exactly as in image 1. \
+CRITICAL — famous monuments must look like the REAL building, not a modern office block: \
+Colosseum = weathered travertine oval amphitheatre with stacked arches, hollow arena, broken south rim \
+(open archaeological park around it — never invent terracotta apartment blocks against its walls); \
+Vittoriano/Altare = bright white marble monument with grand stairs and quadriga \
+(Piazza Venezia in front stays open asphalt — never invent flats in front of or glued into the monument); \
+Pantheon = concrete dome with oculus and portico columns; \
+Trevi = Baroque palace facade with fountain niches and cascading water — never a plain beige slab. \
+Bridges stay LEVEL and straight across the Tiber: stone/travertine flat deck with parapets, \
+piers in the water if present in image 1 — never a road dipping into the river, never blue asphalt \
+over water, never a melted ribbon. Cars only on the deck, never floating above water or rooftops. \
+Do not add, remove, merge or move buildings or trees; do not invent trees over open streets. \
+Match saturation/hue of already-painted neighbour strips — no washed-out grey band across the tile.
+- Streets, squares, parks and the Tiber stay exactly where they are; give them real texture \
+(sampietrini / pale stone paving — not orange —, crosswalks at junctions, grass, water ripples, \
+parked cars along kerbs only, no cars in the driving lanes or on water).
+- Layering is exactly as in image 1: where a bridge crosses rail, river or another road, the \
+bridge deck is continuous and on top — never draw rails, lane markings or water across a bridge deck.
 - Image 3 is only for style. Do not copy its buildings, layout or architecture.
 {continuation}Output: one square 1024x1024 image, no text, no labels, no border, no vignette.
 
-When done, copy the final PNG to {out} and reply only with that path.
+6) Copy the generated PNG to {out} with a shell command. Reply only with that path.
 `;
 const CONTINUATION = `- The strip(s) along the {edges} edge(s) of image 1 are ALREADY-PAINTED neighbouring artwork. \
 Reproduce them unchanged and continue the same palette and detail seamlessly into the rest.
@@ -86,10 +107,10 @@ const { values: args, positionals } = parseArgs({
     older: { type: "string" },
     assemble: { type: "boolean", default: false }, // only rebuild every art tile from the windows
     j: { type: "string", default: "3" },
-    center: { type: "string", default: "32.0715,34.7745" }, // lat,lon painted first (Rothschild / Dizengoff / beach)
+    center: { type: "string", default: "41.8986,12.4769" }, // lat,lon painted first (Pantheon / centro)
   },
 });
-const areaName = positionals[0] ?? "pantheon";
+const areaName = positionals[0] ?? "roma-core";
 const base = join(DERIVED, areaName);
 const manifest = readJson(join(base, "manifest.json"));
 const title = openArea(areaName).title;
@@ -200,11 +221,22 @@ function limitWait(log: string) {
   return backoff * 60_000;
 }
 
+/**
+ * Codex treats a git checkout as the workspace even when -C points at a subfolder, and then
+ * wanders through README/ATTRIBUTION instead of calling image_gen. Run each window in an
+ * isolated temp dir outside the repo so the only files it can see are the four inputs.
+ */
 function codex(cwd: string, prompt: string): Promise<void> {
   return new Promise((resolve) => {
     const log = openSync(join(cwd, "codex.log"), "w");
-    const p = spawn("codex", ["exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", cwd, "-i", "input.png", "-i", "height.png", "-i", "style.png", "-i", "trees.png", "-"],
-      { stdio: ["pipe", log, log] });
+    const p = spawn("codex", [
+      "exec", "--skip-git-repo-check",
+      "-s", "workspace-write",
+      "-C", cwd,
+      "-i", "input.png", "-i", "height.png", "-i", "style.png", "-i", "trees.png",
+      "-c", 'model_reasoning_effort="low"',
+      "-",
+    ], { stdio: ["pipe", log, log] }); // keep real ~/.codex so ChatGPT login / image_gen work
     const timer = setTimeout(() => p.kill("SIGTERM"), 900_000);
     p.on("close", () => { clearTimeout(timer); closeSync(log); resolve(); });
     p.stdin!.end(prompt);
@@ -255,6 +287,20 @@ async function dropDarkWindows(wins: Array<[number, number]>) {
   if (n) console.log(`  dropped ${n} windows with black patches`);
 }
 
+/** Landmarks whose pixel falls inside this paint window (for Rome monument hints). */
+function landmarksInWindow(i: number, j: number): string[] {
+  const city = openArea(areaName).region === "roma-centro" ? "roma" : "";
+  const list = LANDMARKS[city] ?? [];
+  const x0 = i * STRIDE, y0 = j * STRIDE;
+  const hints: string[] = [];
+  for (const L of list) {
+    if (!L.paintHint) continue;
+    const [px, py] = llhToPixel(L.lat, L.lon, 25);
+    if (px >= x0 && px < x0 + WIN && py >= y0 && py < y0 + WIN) hints.push(L.paintHint);
+  }
+  return hints;
+}
+
 async function paintWindow(i: number, j: number) {
   if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) return;
   // open sea: reuse the painted sea texture (mirrored per window so repeats don't line up)
@@ -266,18 +312,34 @@ async function paintWindow(i: number, j: number) {
     console.log(`  ${i}_${j}: sea texture`);
     return;
   }
+  // durable debug copy under data/; Codex itself runs in /tmp outside the git root
   const work = join(base, "work", `${i}_${j}`);
+  const sand = join("/tmp/mondoisometrico-paint", areaName, `${i}_${j}`);
   mkdirSync(work, { recursive: true });
-  const edges = await composeInput(i, j, join(work, "input.png"), join(work, "height.png"));
-  copyFileSync(STYLE, join(work, "style.png"));
-  copyFileSync(TREES, join(work, "trees.png"));
-  const prompt = PROMPT.replace("{title}", title).replace("{out}", join(work, "out.png"))
-    .replace("{continuation}", edges.length ? CONTINUATION.replace("{edges}", edges.join(" and ")) : "");
+  mkdirSync(sand, { recursive: true });
+  const edges = await composeInput(i, j, join(sand, "input.png"), join(sand, "height.png"));
+  copyFileSync(STYLE, join(sand, "style.png"));
+  copyFileSync(TREES, join(sand, "trees.png"));
+  // also keep inputs under data/ for local debugging
+  for (const f of ["input.png", "height.png", "style.png", "trees.png"] as const)
+    copyFileSync(join(sand, f), join(work, f));
+  const outSand = join(sand, "out.png");
+  const hints = landmarksInWindow(i, j);
+  const landmarkBlock = hints.length
+    ? `\nLANDMARKS IN THIS WINDOW (paint these as the REAL monuments — footprint stays exact):\n- ${hints.join("\n- ")}\n`
+    : "";
+  const prompt = PROMPT.replace("{title}", title).replace("{out}", outSand)
+    .replace("{continuation}", (edges.length ? CONTINUATION.replace("{edges}", edges.join(" and ")) : "") + landmarkBlock);
+  /** Best landmark attempt so a recognizable monument isn't discarded for a borderline geometric score. */
+  let bestLandmark: { score: number; identity: number; texture: number; out: string; r: Awaited<ReturnType<typeof register>> } | null = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     while (Date.now() < resumeAt) await sleep(Math.min(60_000, resumeAt - Date.now()));
-    rmSync(join(work, "out.png"), { force: true });
+    rmSync(outSand, { force: true });
     const t0 = Date.now();
-    await codex(work, prompt);
+    await codex(sand, prompt);
+    // copy log + output back into the area work dir
+    if (existsSync(join(sand, "codex.log"))) copyFileSync(join(sand, "codex.log"), join(work, "codex.log"));
+    if (existsSync(outSand)) copyFileSync(outSand, join(work, "out.png"));
     if (!existsSync(join(work, "out.png"))) {
       const log = readFileSync(join(work, "codex.log"), "utf8").slice(-4000);
       if (LIMIT.test(log)) {
@@ -297,16 +359,37 @@ async function paintWindow(i: number, j: number) {
         continue;
       }
       const structured = r.texture >= MIN_TEXTURE; // open sea / empty land: correlation is meaningless
+      if (hints.length && !(await hasDarkPatch(join(work, "out.png"), join(work, "input.png")))) {
+        const cand = join(work, `out-best.png`);
+        if (!bestLandmark || r.score > bestLandmark.score) {
+          copyFileSync(join(work, "out.png"), cand);
+          bestLandmark = { score: r.score, identity: r.identity, texture: r.texture, out: cand, r };
+        }
+      }
       if (structured && r.score < MIN_MATCH && attempt < 3) {
         console.warn(`  ${i}_${j}: match ${r.score.toFixed(2)} < ${MIN_MATCH}, repainting`);
         continue;
+      }
+      // Landmark windows: prefer a clean bar; if all attempts miss, keep the best that still follows the render.
+      if (structured && r.score < MIN_MATCH && hints.length) {
+        if (bestLandmark && bestLandmark.score >= bestLandmark.identity && bestLandmark.score >= MIN_MATCH - 0.08) {
+          console.warn(`  ${i}_${j}: landmark match ${r.score.toFixed(2)} < ${MIN_MATCH} — keeping best ${bestLandmark.score.toFixed(2)}`);
+          const warp = bestLandmark.score > bestLandmark.identity + 0.01;
+          await applyRegistration(bestLandmark.out, winFile(i, j), warp ? bestLandmark.r : { ...bestLandmark.r, scale: 1, dx: 0, dy: 0 });
+          console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${bestLandmark.score.toFixed(2)} (landmark best)`);
+          for (const f of ["input.png", "height.png", "style.png", "trees.png", "out.png", "out-best.png"]) rmSync(join(work, f), { force: true });
+          return;
+        }
+        console.warn(`  ${i}_${j}: match ${r.score.toFixed(2)} < ${MIN_MATCH} on landmark — discarding`);
+        rmSync(winFile(i, j), { force: true });
+        return;
       }
       const warp = structured && r.score > r.identity + 0.01;
       await applyRegistration(join(work, "out.png"), winFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
       console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${r.score.toFixed(2)}`
         + (structured ? "" : " (low texture)") + (warp ? ` shift=(${r.dx},${r.dy}) scale=${r.scale.toFixed(2)}` : ""));
       // keep qa.json + codex.log for debugging; the images are ~6 MB per window
-      for (const f of ["input.png", "height.png", "style.png", "trees.png", "out.png"]) rmSync(join(work, f), { force: true });
+      for (const f of ["input.png", "height.png", "style.png", "trees.png", "out.png", "out-best.png"]) rmSync(join(work, f), { force: true });
       return;
     }
     console.error(`  ${i}_${j}: attempt ${attempt} failed, see ${join(work, "codex.log")}`);
@@ -460,20 +543,29 @@ async function main() {
   }
   if (args.plan) return console.log(`${wins.length} windows`);
   if (args.assemble) { await harmoniseSea(); return assemble(true); }
-  // centre first: square rings around the city centre. Each ring runs in two passes over its
-  // perimeter (even, then odd positions) so every window continues its painted inner/ring neighbours.
-  const [cx, cy] = args.center.split(",").map(Number);
+  // single-window mode: paint just that cell and assemble once (no 9000 empty rings)
+  if (args.window) {
+    const [wi, wj] = wins[0];
+    console.log(`1 window ${wi}_${wj}`);
+    await paintWindow(wi, wj);
+    await assemble(true);
+    return;
+  }
+  // centre first: square rings around the focus. --near also recentres rings (otherwise a Colosseum
+  // patch still expands from the default Pantheon centre through empty rings).
+  const [cx, cy] = (args.near ?? args.center).split(",").map(Number);
   const [px, py] = llhToPixel(cx, cy, 25);
   const ci = Math.floor(px / STRIDE), cj = Math.floor(py / STRIDE);
   const have = new Set(wins.map(([i, j]) => `${i}_${j}`));
-  const maxR = Math.max(...wins.map(([i, j]) => Math.max(Math.abs(i - ci), Math.abs(j - cj))));
+  const maxR = Math.max(0, ...wins.map(([i, j]) => Math.max(Math.abs(i - ci), Math.abs(j - cj))));
   console.log(`${wins.length} windows in ${maxR + 1} rings around ${ci}_${cj}`);
   // first: paint one open-sea window and keep it as the reusable sea texture
   // (validated: a bad paint would otherwise be stamped over every open-sea window)
   // a bad sea texture (or windows painted with black bands) never survives a restart: drop and redo them
   if (existsSync(SEA) && !(await looksLikeSea(SEA))) { console.warn("  sea texture is bad, repainting it"); rmSync(SEA); }
-  if (!args.window && !OLDER) await dropDarkWindows(wins);
-  if (!existsSync(SEA) && !args.window && !OLDER) {
+  if (!OLDER) await dropDarkWindows(wins);
+  // skip sea-texture hunt on small --near patches (Rome centro has no open sea anyway)
+  if (!existsSync(SEA) && !OLDER && !args.near) {
     const open = [];
     for (const [i, j] of windows()) if ((await seaFraction(i, j)) >= 0.995) open.push([i, j]);
     for (const [i, j] of open.slice(0, 3)) {
@@ -497,11 +589,14 @@ async function main() {
       for (let k = 0; k < 2 * r; k++) ring.push([ci + r - k, cj + r]);  // bottom, right → left
       for (let k = 0; k < 2 * r; k++) ring.push([ci - r, cj + r - k]);  // left, bottom → top
     }
+    let painted = 0;
     for (const pass of [0, 1]) {
       const todo = ring.filter(([i, j], k) => k % 2 === pass && have.has(`${i}_${j}`));
+      if (!todo.length) continue;
       await pool(todo, Number(args.j), ([i, j]) => paintWindow(i, j));
+      painted += todo.length;
     }
-    await assemble(); // finished tiles become visible ring by ring
+    if (painted) await assemble(); // finished tiles become visible ring by ring
   }
   await harmoniseSea(); // then every tile with open water is rebuilt with the harmonised sea
   await assemble(!args.window);

@@ -58,7 +58,8 @@ function ringFromLonLat(coords: number[][]): P2[] | null {
   if (far > 0) r = [...simplify(r.slice(0, far + 1), 0.35).slice(0, -1), ...simplify([...r.slice(far), r[0]], 0.35).slice(0, -1)];
   if (r.length < 3) return null;
   if (area2(r) < 0) r.reverse();
-  return Math.abs(area2(r)) >= 6 ? r : null;
+  // Drop stub footprints (< ~25 m²) — they paint as lone 2-window shards in plazas
+  return Math.abs(area2(r)) >= 25 ? r : null;
 }
 
 function inside([x, y]: P2, poly: P2[]) {
@@ -76,18 +77,112 @@ const hash = (n: number) => { let x = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b); x ^
  * Visual style index used by the renderer (palette + facade pattern):
  * 0 Bauhaus/International (pre-1950, white, ribbon windows) · 1 1950–90s residential (cream, balcony bands)
  * 2 public (stone) · 3 tower (glass curtain wall) · 4 shed · 5 modern mid-rise (light grey, big windows)
+ * Landmarks / public buildings stay stone (2) even when very tall — Vittoriano must not become glass.
  */
-function style(height: number, kind: string, id: number, year?: number | null) {
-  if (height >= 55) return 3;
-  if (kind === "public") return 2;
+function style(height: number, kind: string, id: number, year?: number | null, landmark = false) {
   if (kind === "temporary") return 4;
+  if (landmark || kind === "public") return 2;
+  if (height >= 55) return 3;
   if (year && year < 1950 && height < 25) return 0;
   if (year && year >= 1995) return 5;
   if (!year) return hash(id) < 0.3 ? 0 : hash(id) < 0.8 ? 1 : 5;
   return hash(id) < 0.25 ? 0 : 1;
 }
 
-const name = process.argv[2] ?? "pantheon";
+/** Known Rome monuments: OSM often lacks height / splits multipolygons into stub outers. */
+const LANDMARK_H: Record<string, number> = {
+  colosseo: 48.5,
+  colosseum: 48.5,
+  "altare della patria": 70,
+  "monument to vittorio emanuele ii": 70,
+  vittoriano: 70,
+  pantheon: 43,
+  "castel sant'angelo": 48,
+  "castle of the holy angel": 48,
+  "fontana di trevi": 26,
+  "trevi fountain": 26,
+  "basilica di san pietro": 136.6,
+  "st. peter's basilica": 136.6,
+  "arco di costantino": 21,
+  "arco di tito": 15.4,
+  "teatro di marcello": 32,
+};
+
+function landmarkHeight(t: Record<string, string>): number | null {
+  const names = [t.name, t["name:en"], t["name:it"], t.alt_name, t.nat_name]
+    .filter(Boolean).map((s) => s!.toLowerCase());
+  for (const n of names) if (LANDMARK_H[n] != null) return LANDMARK_H[n];
+  return null;
+}
+
+function osmKind(t: Record<string, string>): string {
+  if (t.amenity || t.tourism === "attraction" || t.historic ||
+    ["public", "cathedral", "church", "basilica", "temple", "chapel", "mosque", "synagogue",
+      "amphitheatre", "ruins", "castle", "palace", "civic", "government", "university", "school",
+      "hospital", "train_station", "stadium", "triumphal_arch", "obelisk"].includes(t.building))
+    return "public";
+  return "regular";
+}
+
+/** Rough lon/lat polygon area for ranking multipolygon outers (stubs often come first in OSM). */
+function lonLatArea(coords: number[][]) {
+  let a = 0;
+  for (let i = 0, j = coords.length - 1; i < coords.length; j = i++)
+    a += (coords[j][0] - coords[i][0]) * (coords[j][1] + coords[i][1]);
+  return Math.abs(a / 2);
+}
+
+/** Match lon/lat endpoints when stitching multipolygon outer ways. */
+function sameLL(a: number[], b: number[], eps = 1e-10) {
+  return Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps;
+}
+
+/**
+ * Every outer ring with a real footprint (OSM multipolygons often put stubs first).
+ * Open outer ways (Fontana di Trevi, etc.) are chained into closed rings by endpoint.
+ */
+function outerRings(el: any): number[][][] {
+  if (el.type === "way" && el.geometry?.length >= 4)
+    return [el.geometry.map((q: any) => [q.lon, q.lat])];
+  if (el.type !== "relation" || !el.members) return [];
+  const segs: number[][][] = [];
+  for (const m of el.members) {
+    if (m.role !== "outer" || !m.geometry || m.geometry.length < 2) continue;
+    segs.push(m.geometry.map((q: any) => [q.lon, q.lat]));
+  }
+  const out: number[][][] = [];
+  const used = new Uint8Array(segs.length);
+  for (let seed = 0; seed < segs.length; seed++) {
+    if (used[seed]) continue;
+    used[seed] = 1;
+    let ring = segs[seed].map((p) => p.slice());
+    // already closed way
+    if (ring.length >= 4 && sameLL(ring[0], ring[ring.length - 1])) {
+      out.push(ring);
+      continue;
+    }
+    let guard = segs.length + 2;
+    while (guard-- > 0 && !sameLL(ring[0], ring[ring.length - 1])) {
+      const end = ring[ring.length - 1];
+      let hit = -1, rev = false;
+      for (let i = 0; i < segs.length; i++) {
+        if (used[i]) continue;
+        const s = segs[i];
+        if (sameLL(s[0], end)) { hit = i; rev = false; break; }
+        if (sameLL(s[s.length - 1], end)) { hit = i; rev = true; break; }
+      }
+      if (hit < 0) break;
+      used[hit] = 1;
+      const add = rev ? segs[hit].slice().reverse() : segs[hit];
+      ring.push(...add.slice(1).map((p) => p.slice()));
+    }
+    if (ring.length >= 4 && sameLL(ring[0], ring[ring.length - 1])) out.push(ring);
+  }
+  out.sort((a, b) => lonLatArea(b) - lonLatArea(a));
+  return out;
+}
+
+const name = process.argv[2] ?? "roma-core";
 const bbox = openArea(name).bbox;
 const raw = join(RAW, name);
 const out = join(DERIVED, name, "scene");
@@ -136,21 +231,83 @@ const trees: Array<[number, number, number, number]> = [];
 for (const el of osm.elements) {
   const t = el.tags ?? {};
   if (el.type === "node" && t.natural === "tree") { const p = toEnu(el.lon, el.lat); trees.push([p[0], p[1], 3, 6]); continue; }
-  if (!t.building || t.building === "roof" || t.location === "underground") continue;
-  const coords = el.type === "way" ? el.geometry?.map((q: any) => [q.lon, q.lat])
-    : el.members?.find((m: any) => m.role === "outer" && m.geometry)?.geometry.map((q: any) => [q.lon, q.lat]);
-  if (!coords || coords.length < 4) continue;
-  const ring = ringFromLonLat(coords);
-  if (!ring) continue;
-  const c: P2 = [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length];
-  if (covered(c)) continue;
+  // buildings + named fountains/monuments that OSM maps without building=* (e.g. Fontana di Trevi)
+  const isFountain = t.amenity === "fountain" || t.fountain === "yes";
+  const isMonument = !t.building && (t.historic === "monument" || t.historic === "memorial" || t.tourism === "attraction")
+    && (t.name || t["name:en"]);
+  if (t.building === "roof" || t.location === "underground") continue;
   const levels = parseFloat(t["building:levels"]);
-  let h = parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0);
-  if (!h) h = Math.abs(area2(ring)) > 1500 ? 14 : ["house", "garage", "shed", "kiosk"].includes(t.building) ? 5 : 13;
-  buildings.push({ ring, h, s: style(h, t.amenity || t.building === "school" ? "public" : "regular", el.id), g: null });
-  osmCount++;
+  const kind = osmKind(t);
+  const lh = landmarkHeight(t);
+  // Skip anonymous ruins / dig footprints — but keep named landmarks (Colosseum is
+  // historic=archaeological_site + building=amphitheatre; dropping it left an empty park).
+  const ruinLike = t.building === "ruins" || t.historic === "ruins" || t.historic === "archaeological_site";
+  if (ruinLike && !lh && t.building !== "amphitheatre" && !isMonument) continue;
+  if (!t.building && !isFountain && !isMonument) continue;
+  const rings = outerRings(el);
+  if (!rings.length) continue;
+  // Materialise rings first; drop outers whose centroid sits inside a larger outer
+  // (OSM Colosseum / Vittoriano put arena voids and stub fragments as extra outers).
+  const solid: P2[][] = [];
+  for (const coords of rings) {
+    const ring = ringFromLonLat(coords);
+    if (!ring) continue;
+    solid.push(ring);
+  }
+  const kept = solid.filter((ring, idx) => {
+    const c: P2 = [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length];
+    for (let k = 0; k < solid.length; k++) {
+      if (k === idx) continue;
+      if (Math.abs(area2(solid[k])) <= Math.abs(area2(ring))) continue;
+      if (inside(c, solid[k])) return false;
+    }
+    return true;
+  });
+  let part = 0;
+  for (const ring of kept) {
+    const c: P2 = [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length];
+    if (covered(c)) continue;
+    let h = lh || parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0);
+    if (!h) {
+      if (isFountain) h = 4;
+      else if (["house", "garage", "shed", "kiosk"].includes(t.building)) h = 5;
+      else h = Math.abs(area2(ring)) > 1500 ? 14 : 13;
+    }
+    // secondary outers of a multipolygon (arcade wings, annexes) stay a bit lower than the main mass
+    if (lh && part > 0) h = Math.max(8, h * 0.55);
+    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null });
+    osmCount++;
+    part++;
+  }
 }
 console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
+
+// Clear clutter from monument plazas. Piazza Venezia and the Colosseum valley must stay open:
+// OSM stubs / kiosks / wrong outers otherwise extrude as apartment blocks and paint invents more.
+{
+  const plazas: Array<{ lat: number; lon: number; r: number; minH: number; label: string }> = [
+    // keep only Vittoriano mass (~70 m); Assicurazioni / Palazzo Venezia sit ~120 m+ out
+    { lat: 41.894687, lon: 12.483066, r: 115, minH: 55, label: "Altare/Piazza Venezia" },
+    // keep Colosseum amphitheatre (~48 m); strip modern infill / stubs in the valley park
+    { lat: 41.89021, lon: 12.492231, r: 130, minH: 40, label: "Colosseo park" },
+    // keep Palazzo Poli; clear kiosk/stub clutter in Piazza di Trevi so paint doesn't invent a tiny fountain
+    { lat: 41.900978, lon: 12.483285, r: 45, minH: 22, label: "Trevi piazza" },
+  ];
+  let dropped = 0;
+  for (const P of plazas) {
+    const c = toEnu(P.lon, P.lat);
+    for (let i = buildings.length - 1; i >= 0; i--) {
+      const b = buildings[i];
+      const cx = b.ring.reduce((a, p) => a + p[0], 0) / b.ring.length;
+      const cy = b.ring.reduce((a, p) => a + p[1], 0) / b.ring.length;
+      if (Math.hypot(cx - c[0], cy - c[1]) < P.r && b.h < P.minH) {
+        buildings.splice(i, 1);
+        dropped++;
+      }
+    }
+  }
+  console.log(`  cleared ${dropped} clutter buildings from monument plazas`);
+}
 
 // Bridges and decks recorded as buildings (Arlozorov / Savidor over the Ayalon): any footprint a
 // motorway, trunk road or railway runs through for 20 m+ is not a building. Drop it; the road is drawn.

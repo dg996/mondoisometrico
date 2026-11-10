@@ -32,7 +32,7 @@ const R_EARTH = 6371000;
  */
 export interface Feature { k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
 
-const name = process.argv[2] ?? "pantheon";
+const name = process.argv[2] ?? "roma-core";
 const area = openArea(name);
 const [S, W, N, E] = area.bbox;
 const bb = [S - MARGIN, W - MARGIN, N + MARGIN, E + MARGIN];
