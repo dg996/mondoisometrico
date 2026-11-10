@@ -89,10 +89,9 @@ export class Traffic {
       const len = bus ? 13.5 : 5.6 + this.rand() * 0.7;
       if (way.len < len + 4) continue;
       // skip ways that are mostly occluded / water-hidden (cars must not spawn in the river)
-      let vis = 0, tot = 0;
-      for (let k = 3; k < way.r.s.length; k += 4) { tot++; vis += way.r.s[k]; }
-      if (tot && vis / tot < 0.55) continue; // mostly-hidden ways (river dips) never spawn traffic
+      if (this.wayVisible(way) < 0.55) continue;
       const s = len / 2 + this.rand() * (way.len - len);
+      if (!this.sampleVisible(way, s)) continue; // exact spawn point must be on visible asphalt
       const lane = bus ? 0 : Math.floor(this.rand() * way.r.l);
       // never spawn on top of another vehicle
       const group = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
@@ -135,10 +134,30 @@ export class Traffic {
 
   private endNode(v: Vehicle) { const r = this.ways[v.w].r; return v.dir === 1 ? r.b : r.a; }
 
+  /** Fraction of samples still marked visible (0 = fully occluded / in the river). */
+  private wayVisible(way: Way) {
+    const S = way.r.s;
+    let vis = 0, tot = 0;
+    for (let k = 3; k < S.length; k += 4) { tot++; vis += S[k]; }
+    return tot ? vis / tot : 0;
+  }
+
+  /** True if the sample nearest `dist` along the way (travel metres) is visible with neighbours. */
+  private sampleVisible(way: Way, dist: number) {
+    const S = way.r.s;
+    const s = Math.max(0, Math.min(way.len, dist));
+    let i = 1;
+    while (i < way.n - 1 && way.cum[i] < s) i++;
+    const i0 = Math.max(0, i - 1), i1 = Math.min(way.n - 1, i + 1);
+    return !!(S[i * 4 + 3] && S[i0 * 4 + 3] && S[i1 * 4 + 3]);
+  }
+
   private chooseNext(v: Vehicle) {
     const options = (this.out.get(this.endNode(v)) ?? []).filter((o) => o.w !== v.w);
-    const pool = v.bus ? options.filter((o) => this.ways[o.w].r.c <= 3) : options;
-    const from = pool.length ? pool : options;
+    // Never route onto mostly-hidden / river-dipped ways (cars would sit in water or float).
+    const drivable = options.filter((o) => this.wayVisible(this.ways[o.w]) >= 0.55);
+    const pool = (v.bus ? drivable.filter((o) => this.ways[o.w].r.c <= 3) : drivable);
+    const from = pool.length ? pool : drivable;
     if (!from.length) return null;
     const weights = from.map((o) => CLASS_WEIGHT[this.ways[o.w].r.c] + 0.05);
     let pick = this.rand() * weights.reduce((a, b) => a + b, 0), k = 0;
@@ -239,11 +258,13 @@ export class Traffic {
   /** Move a vehicle stranded at a one-way dead end (data gap) to a random free road start. */
   private respawn(v: Vehicle) {
     this.release(v);
-    for (let tries = 0; tries < 20; tries++) {
+    for (let tries = 0; tries < 40; tries++) {
       const w = Math.floor(this.rand() * this.ways.length), way = this.ways[w];
       const dir: 1 | -1 = way.r.o === -1 ? -1 : way.r.o === 1 ? 1 : this.rand() < 0.5 ? 1 : -1;
       const start = (this.nodeR.get(dir === 1 ? way.r.a : way.r.b) ?? 4) + v.len / 2;
       if (way.r.c > 3 || way.len < start + v.len + 30 || (v.bus && way.r.c > 2)) continue;
+      if (this.wayVisible(way) < 0.55) continue; // no river / occluded respawns
+      if (!this.sampleVisible(way, start)) continue;
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false });
