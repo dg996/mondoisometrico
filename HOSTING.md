@@ -26,54 +26,27 @@ npx wrangler r2 bucket create mondoisometricotiles
 - CORS: allow any origin, methods `GET` and `HEAD`.
 - Put the public HTTPS origin (no trailing slash) in `.env` as `TILES_ORIGIN`.
 
-## 3. Site Worker
+## 3. Sito Vercel e rilascio manuale
 
-`.env`:
+Produzione: https://mondoisometrico.vercel.app e dominio custom indicato sopra.
+La root del progetto usa `vercel.json`: build `npm run build`, output `web/dist`.
+`TILES_ORIGIN` deve essere configurato anche nell'ambiente di build Vercel.
 
-```
-SITE_DOMAIN=mondoisometrico.domenicogagliardi.com
-TILES_ORIGIN=https://tiles.mondoisometrico.domenicogagliardi.com
-CLOUDFLARE_ACCOUNT_ID=…
-# optional: CLOUDFLARE_API_TOKEN=…  (R2 Object Read & Write)
-```
+Per il batch Roma seguire **[docs/roma-quality-batch.md](docs/roma-quality-batch.md)**:
+scene/render/paint/export locali, controllo completo, poi **un solo** publish R2
+seguito da **un solo** `npx vercel --prod` dalla root.
 
-Worker name in `wrangler.jsonc`: `mondoisometrico`.
+`world.json` viene inviato per ultimo e solo dopo il controllo dei riferimenti su R2.
+Non modificare il manifest a mano. Nessun deploy a metà batch.
+I deploy automatici Git sono disabilitati per `main` e per il branch della PR del batch,
+così push e merge non anticipano la pubblicazione manuale.
 
-Deploy (after a local `npm run build` has produced `web/dist`):
+Il Worker Cloudflare resta un backup: `npm run deploy` pubblica quel Worker,
+**non** il sito Vercel, e non va usato nel rilascio Roma descritto qui.
 
-```sh
-npm run deploy
-```
+## 4. DNS
 
-That runs `wrangler deploy --domain mondoisometrico.domenicogagliardi.com`.
-
-Optional analytics: `npx wrangler secret put PIRSCH_ACCESS_KEY`.
-
-## 4. DNS on GoDaddy (`domenicogagliardi.com`)
-
-Add these records (TTL 600 or default):
-
-| Type | Name | Value | Notes |
-|------|------|-------|--------|
-| CNAME | `mondoisometrico` | target shown by Cloudflare after attaching the Worker custom domain (often `mondoisometrico.<account>.workers.dev` or Cloudflare’s domain instructions) | Site |
-| CNAME | `tiles.mondoisometrico` | target from R2 custom domain setup | Tile CDN |
-
-If GoDaddy refuses a CNAME on a name that already has records, remove conflicts first.
-After DNS propagates, Cloudflare will issue TLS certificates automatically.
-
-**Do not** point this subdomain at Vercel — the stack is Cloudflare only.
-
-## 5. First map publish (after pipeline)
-
-```sh
-npm run fetch -- pantheon
-npm run ground -- pantheon
-npm run scene -- pantheon
-npm run render -- pantheon -j 2
-# paint only when ready (Codex CLI): npm run paint -- pantheon --center 41.8986,12.4769
-npm run export -- pantheon
-npm run publish -- roma-centro    # asks [y/N]; uploads to R2
-npm run deploy                    # rebuild site against new world.json
-```
-
-Never run `publish` / `deploy` without an explicit go-ahead for production.
+Il CNAME `mondoisometrico` deve seguire il valore mostrato da **Vercel** per il dominio
+collegato; il dominio delle tile segue quello mostrato da **R2**. Non sostituire i
+record funzionanti con i vecchi esempi del Worker. Il rilascio del batch non richiede
+modifiche DNS.

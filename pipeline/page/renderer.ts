@@ -296,7 +296,7 @@ function buildObjects(data: TileObjects) {
       pos.push(ring[v][0], ring[v][1], top); nor.push(0, 0, 1); col.push(...roof); fac.push(0, -1000); tow.push(0);
     }
     // rooftop clutter on flat residential roofs: solar water heaters (panel + tank), AC units
-    if (style !== 3 && style !== 4 && h > 6) {
+    if (style !== 2 && style !== 3 && style !== 4 && h > 6) {
       const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
       const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
       const area = Math.abs(THREE.ShapeUtils.area(ring.map(([x, y]) => new THREE.Vector2(x, y))));

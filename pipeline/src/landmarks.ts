@@ -12,6 +12,8 @@ export interface Landmark {
   pinH?: number;
   /** Extra paint-prompt hint so Codex paints the real monument, not a generic block. */
   paintHint?: string;
+  /** Approximate footprint radius: hints also reach windows clipping the monument. */
+  paintRadiusM?: number;
 }
 
 /** Landmark lists keyed by city slug (places.ts CITIES). WGS84 from OSM centroids. */
@@ -19,25 +21,25 @@ export const LANDMARKS: Record<string, Landmark[]> = {
   roma: [
     {
       // Nominatim Pantheon centroid
-      name: "Pantheon", lat: 41.898616, lon: 12.476833, minPx: 0.08, pinH: 16,
-      paintHint: "Pantheon (MUST dominate this view): huge grey hemispherical concrete dome with a round oculus on top, cylindrical brick drum, triangular pediment portico with tall columns facing the square. Piazza della Rotonda fountain is in front — do NOT paint the Pantheon as a normal terracotta apartment block.",
+      paintRadiusM: 65, name: "Pantheon", lat: 41.898616, lon: 12.476833, minPx: 0.08, pinH: 16,
+      paintHint: "Pantheon (keep exact OSM footprint and scale): portico on the NORTH side toward Piazza della Rotonda (upper-left in this camera), rotunda behind it to the south/lower-right. Do NOT mirror it or turn the portico toward the viewer. The north facade may be partly hidden by the dome. A huge grey hemispherical concrete dome with a round oculus on top, cylindrical brick drum, triangular pediment portico with tall columns facing the square. Piazza della Rotonda fountain is in front — do NOT paint the Pantheon as a normal terracotta apartment block.",
     },
     { name: "Piazza Navona", lat: 41.898928, lon: 12.473118, minPx: 0.1, pinH: 8 },
     {
       // Nominatim Fontana di Trevi
-      name: "Fontana di Trevi", lat: 41.900978, lon: 12.483285, minPx: 0.1, pinH: 8,
-      paintHint: "Fontana di Trevi (MUST dominate the square): Palazzo Poli is a WIDE multi-storey palace facade filling the north side of the piazza — Corinthian columns, Oceanus niche with sculpted figures, cascading white water into a large basin that fills most of the square. Do NOT paint it as a tiny fountain model; the palace facade is as tall as neighbouring apartment blocks.",
+      paintRadiusM: 55, name: "Fontana di Trevi", lat: 41.900978, lon: 12.483285, minPx: 0.1, pinH: 8,
+      paintHint: "Fontana di Trevi (keep exact OSM scale, do not shrink or relocate): fountain facade on the SOUTH/SOUTHEAST side of Palazzo Poli, facing the basin to lower-right on screen; the palace extends behind it north/upper-left. Palazzo Poli is a WIDE multi-storey palace facade filling the north side of the piazza — Corinthian columns, Oceanus niche with sculpted figures, cascading white water into a large basin that fills most of the square. Do NOT paint it as a tiny fountain model; the palace facade is as tall as neighbouring apartment blocks.",
     },
     {
       // Amphitheatre centroid (not the metro stop ~80 m NW)
-      name: "Colosseo", lat: 41.89021, lon: 12.492231, minPx: 0.06, pinH: 18,
-      paintHint: "Colosseum / Colosseo (MUST dominate): weathered elliptical travertine amphitheatre with 3–4 tiers of arches, hollow sandy arena, broken outer wall on the south side. Immediate surroundings are archaeological park / open paving and grass — NO modern terracotta apartment blocks glued to the amphitheatre walls. Match warm Rome palette (ochre, grass green) with neighbouring painted tiles — no grey washed band.",
+      paintRadiusM: 125, name: "Colosseo", lat: 41.89021, lon: 12.492231, minPx: 0.06, pinH: 18,
+      paintHint: "Colosseum / Colosseo (keep OSM footprint): long axis WNW–ESE (approximately 115/295 degrees geographic, mostly left–right in this camera), not a circular stadium; weathered elliptical travertine amphitheatre with 3–4 tiers of arches, hollow sandy arena, broken outer wall on the south side. Immediate surroundings are archaeological park / open paving and grass — NO modern terracotta apartment blocks glued to the amphitheatre walls. Match warm Rome palette (ochre, grass green) with neighbouring painted tiles — no grey washed band.",
     },
     { name: "Foro Romano", lat: 41.891641, lon: 12.486730, minPx: 0.1, pinH: 6 },
     {
       // Nominatim Vittoriano
-      name: "Altare della Patria", lat: 41.894687, lon: 12.483066, minPx: 0.08, pinH: 20,
-      paintHint: "Altare della Patria / Vittoriano (MUST dominate): dazzling WHITE marble monument only — grand staircase facing Piazza Venezia, Corinthian colonnade, bronze equestrian statue, quadrigae on the propylaea. Piazza Venezia in front must stay OPEN asphalt/plaza (no apartment blocks in front of the stairs). Do NOT glue tan residential buildings into the monument sides — the wings are white marble too, not ochre flats.",
+      paintRadiusM: 140, name: "Altare della Patria", lat: 41.894687, lon: 12.483066, minPx: 0.08, pinH: 20,
+      paintHint: "Altare della Patria / Vittoriano (keep OSM footprint): principal stairway faces north/northwest toward Piazza Venezia (upper-left on screen); rear is toward the Capitoline hill, lower-right; never rotate it to show the front. dazzling WHITE marble monument only — grand staircase facing Piazza Venezia, Corinthian colonnade, bronze equestrian statue, quadrigae on the propylaea. Piazza Venezia in front must stay OPEN asphalt/plaza (no apartment blocks in front of the stairs). Do NOT glue tan residential buildings into the monument sides — the wings are white marble too, not ochre flats.",
     },
     {
       name: "Castel Sant'Angelo", lat: 41.903118, lon: 12.466343, minPx: 0.08, pinH: 18,

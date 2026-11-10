@@ -20,6 +20,7 @@ import { createInterface } from "node:readline/promises";
 import { HOSTING } from "./hosting.ts";
 import { WEB_CACHE, WEB_STATE } from "./paths.ts";
 import { REGIONS } from "./places.ts";
+import { verifyWorldReferences, type WorldReferences } from "./publish-references.ts";
 
 const args = process.argv.slice(2);
 const region = args.find((a) => !a.startsWith("--")) ?? "roma-centro";
@@ -94,21 +95,8 @@ const worldRel = dataFiles.find((f) => f.endsWith("world.json"));
 const dataFirst = dataFiles.filter((f) => f !== worldRel);
 for (const f of dataFirst) { await put(f); done++; }
 if (worldRel) {
-  const world = JSON.parse(readFileSync(join(dir, worldRel), "utf8")) as { files?: Record<string, string>; previews?: Record<string, Record<string, { file: string }>> };
-  const needed = new Set<string>();
-  for (const name of Object.values(world.files ?? {})) needed.add(`data/${name}`);
-  for (const city of Object.values(world.previews ?? {}))
-    for (const p of Object.values(city)) if (p?.file) needed.add(p.file);
-  const have = new Set(files);
-  const missing = [...needed].filter((f) => !have.has(f));
-  if (missing.length) {
-    throw new Error(`world.json references files not in this publish (would 404 live): ${missing.join(", ")}`);
-  }
-  // Also require the referenced objects to already be on R2 (or just uploaded above).
-  for (const f of needed) {
-    const probe = await fetch(`${HOSTING.origin}/regions/${region}/${f}?check=${Date.now()}`);
-    if (!probe.ok) throw new Error(`ref ${f} not reachable on R2 (${probe.status}) — aborting world.json upload`);
-  }
+  const world = JSON.parse(readFileSync(join(dir, worldRel), "utf8")) as WorldReferences;
+  await verifyWorldReferences(world, `${HOSTING.origin}/regions/${region}`);
   await put(worldRel); done++;
 }
 console.log(`\r  ${done}/${files.length} uploaded and checked in ${((Date.now() - t0) / 1000).toFixed(0)} s`);

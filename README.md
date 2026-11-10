@@ -21,6 +21,7 @@ npm install
 npm run dev            # http://localhost:<port>/roma
 ```
 
+Batch Roma, QA e rilascio unico: **[docs/roma-quality-batch.md](docs/roma-quality-batch.md)**.
 Hosting e DNS: **[HOSTING.md](HOSTING.md)**.  
 Regole pipeline / agenti: **[AGENTS.md](AGENTS.md)**.
 
@@ -35,7 +36,7 @@ npm run render -- pantheon -j 2
 npm run paint -- pantheon --center 41.8986,12.4769   # Codex CLI; rivedere prima di espandere
 npm run export -- pantheon
 npm run publish -- roma-centro   # solo con conferma esplicita
-npm run deploy
+npx vercel --prod              # solo dopo QA e publish R2 del batch completo
 ```
 
 ## Licenza

@@ -8,6 +8,15 @@
 import { chromium } from "playwright-core";
 import { CHROME, siteUrl } from "./paths.ts";
 
+// Deterministic regression mode needs no browser, data/ or network.
+if (process.argv.includes("--fixtures")) {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--test",
+    fileURLToPath(new URL("traffic-safety.test.ts", import.meta.url)),
+    fileURLToPath(new URL("road-safety.test.ts", import.meta.url))], { stdio: "inherit" });
+  process.exit(r.status ?? 1);
+}
 const url = siteUrl(process.argv[2]);
 const minutes = Number(process.argv[3] ?? 5);
 const b = await chromium.launch({ executablePath: CHROME, headless: true });
@@ -57,7 +66,7 @@ const r = await page.evaluate((steps) => {
       }
   });
   const speeds = T.vehicles.map((v: any) => v.v * 3.6).sort((a: number, b2: number) => a - b2);
-  const q = (f: number) => speeds[Math.floor(f * (speeds.length - 1))].toFixed(0);
+  const q = (f: number) => (speeds[Math.floor(f * (speeds.length - 1))] ?? 0).toFixed(0);
   return { kinds: Object.entries(kinds).sort((x, y) => y[1] - x[1]).slice(0, 12), n: T.vehicles.length, overlaps, sameWay, stopped: speeds.filter((s: number) => s < 1).length,
     stuck: T.vehicles.filter((v: any) => v.stuck > 20).length, kmh: `p10 ${q(0.1)} · p50 ${q(0.5)} · p90 ${q(0.9)}` };
 }, minutes * 600);
