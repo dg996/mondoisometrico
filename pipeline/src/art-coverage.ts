@@ -36,3 +36,12 @@ export function artCoverage(bounds: ArtBounds, painted: Set<string>, rendered: S
     }
   return { bounds, expected, painted: expected - missingPaint.length, missingPaint, missingRender };
 }
+
+/** An expanded, rotated OSM area is not a rectangle. Require every planned render tile to be
+ * painted; the precise mask leaves the corners and holes inactive instead of inventing land. */
+export function renderedCoverage(bounds: ArtBounds, painted:Set<string>, rendered:Set<string>,tile:number) {
+  const expected=[...rendered].filter(k=>tileIntersects(k,bounds,tile));
+  const missingPaint=expected.filter(k=>!painted.has(k));
+  const missingRender=[...painted].filter(k=>tileIntersects(k,bounds,tile)&&!rendered.has(k));
+  return {bounds,expected:expected.length,painted:expected.length-missingPaint.length,missingPaint,missingRender};
+}

@@ -2,7 +2,7 @@
 import sharp from "sharp";
 
 /** Ellipsoid height of mean sea level near Rome (geoid undulation, EGM2008 ≈ 48.5 m). */
-export const SEA_H = 48.5;
+export { SEA_H } from "./vertical-datum.ts";
 
 /** Decode a height PNG (ellipsoid height in cm + 10000, R<<8|G; alpha 0 = nothing rendered). */
 export async function readHeights(file: string) {

@@ -14,7 +14,8 @@ if (process.argv.includes("--fixtures")) {
   const { fileURLToPath } = await import("node:url");
   const r = spawnSync(process.execPath, ["--import", "tsx", "--test",
     fileURLToPath(new URL("traffic-safety.test.ts", import.meta.url)),
-    fileURLToPath(new URL("road-safety.test.ts", import.meta.url))], { stdio: "inherit" });
+    fileURLToPath(new URL("road-safety.test.ts", import.meta.url)),
+    fileURLToPath(new URL("map-integrity.test.ts", import.meta.url))], { stdio: "inherit" });
   process.exit(r.status ?? 1);
 }
 const url = siteUrl(process.argv[2]);

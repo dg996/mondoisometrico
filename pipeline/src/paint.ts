@@ -12,13 +12,15 @@
  *   npm run paint -- tlv-core -j 3                              # everything, centre first (--center lat,lon)
  */
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { windowPalette, applyPalette } from "./palette.ts";
 import { parseArgs } from "node:util";
 import sharp, { type OverlayOptions } from "sharp";
 import { openArea } from "./areas.ts";
 import { parseArtBounds, tileIntersects } from "./art-coverage.ts";
-import { CAMERA, llhToPixel } from "./camera.ts";
+import { CAMERA, llhToPixel, enuToPixel } from "./camera.ts";
+import { landmarkProjector } from "./landmark-anchors.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { DERIVED, PIPELINE, readJson, writeAtomic } from "./paths.ts";
 import { SEA_H, readHeights } from "./heights.ts";
@@ -102,6 +104,7 @@ const { values: args, positionals } = parseArgs({
     plan: { type: "boolean", default: false },
     window: { type: "string" },
     near: { type: "string" },
+    context: { type: "string" }, // comma-separated adjacent areas; share global paint windows and palette
     "art-bounds": { type: "string" }, // x0,y0,x1,y1 global art px: paint only the release rectangle
     radius: { type: "string", default: "1" },
     force: { type: "boolean", default: false },
@@ -116,6 +119,10 @@ const areaName = positionals[0] ?? "roma-core";
 const base = join(DERIVED, areaName);
 const manifest = readJson(join(base, "manifest.json"));
 const title = openArea(areaName).title;
+const contextAreas=(args.context??"").split(",").filter(Boolean);
+for(const other of contextAreas) if(openArea(other).region!==openArea(areaName).region) throw new Error("paint context must use the same region/camera");
+openArea(areaName);
+const projectLandmark = landmarkProjector([areaName]);
 const OLDER = args.older ? new Date(args.older).getTime() : 0;
 const mtime = (f: string) => (existsSync(f) ? statSync(f).mtimeMs : 0);
 /** painted in the current style (with --older, windows painted before the cut-off don't count) */
@@ -129,7 +136,20 @@ const winDir = join(base, "windows");
 mkdirSync(winDir, { recursive: true });
 
 const renderFile = (tx: number, ty: number) => join(base, "render", `${tx}_${ty}.png`);
-const winFile = (i: number, j: number) => join(winDir, `${i}_${j}.png`);
+const localWinFile = (i:number,j:number) => join(winDir,`${i}_${j}.png`);
+const winFile = (i:number,j:number) => [localWinFile(i,j),...contextAreas.map(a=>join(DERIVED,a,"windows",`${i}_${j}.png`))].find(existsSync) ?? localWinFile(i,j);
+const paletteFiles = () => {
+  const files = new Map<string,string>();
+  for(const area of [...contextAreas,areaName].sort()) {
+    const dir=join(DERIVED,area,"windows"); if(!existsSync(dir)) continue;
+    for(const file of readdirSync(dir).filter(f=>/^-?\d+_-?\d+\.png$/.test(f))) {
+      const key=file.slice(0,-4), path=join(dir,file), prev=files.get(key);
+      if(prev && !readFileSync(prev).equals(readFileSync(path))) throw new Error(`conflicting paint window ${key}: ${prev} / ${path}; choose one canonical painting before assembly`);
+      files.set(key,path);
+    }
+  }
+  return files;
+};
 
 /** Crop a global-pixel box out of tiles produced by `load(tx, ty)` (1024² PNG buffers or null). */
 async function cropGlobal(x: number, y: number, w: number, h: number,
@@ -184,9 +204,9 @@ function windows(): Array<[number, number]> {
 async function composeInput(i: number, j: number, file: string, heightFile: string) {
   const ground = await windowGround(i * STRIDE, j * STRIDE);
   await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN, (tx, ty) => heightTile(tx, ty, ground))).png().toFile(heightFile);
-  // lift baked photogrammetry shadows so footprints and streets read clearly
+  // Keep one exposure and palette across all windows; per-window CLAHE changed local tones.
   const lifted = await sharp(await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN)).png().toBuffer())
-    .removeAlpha().clahe({ width: 128, height: 128, maxSlope: 2 }).modulate({ saturation: 1.1 }).png().toBuffer();
+    .removeAlpha().png().toBuffer();
   const img = sharp(lifted);
   const comps: OverlayOptions[] = [];
   const edges: string[] = [];
@@ -288,7 +308,7 @@ async function dropDarkWindows(wins: Array<[number, number]>) {
   for (const [i, j] of wins) {
     if (!existsSync(winFile(i, j))) continue;
     const render = await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN)).png().toBuffer();
-    if (await hasDarkPatch(winFile(i, j), render)) { rmSync(winFile(i, j)); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
+    if (existsSync(localWinFile(i,j)) && await hasDarkPatch(localWinFile(i,j), render)) { rmSync(localWinFile(i,j)); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
   }
   if (n) console.log(`  dropped ${n} windows with black patches`);
 }
@@ -301,10 +321,12 @@ function landmarksInWindow(i: number, j: number): string[] {
   const hints: string[] = [];
   for (const L of list) {
     if (!L.paintHint) continue;
-    const [px, py] = llhToPixel(L.lat, L.lon, SEA_H + (L.pinH ?? 16));
+    const [px, py] = projectLandmark(L);
     const radius = (L.paintRadiusM ?? 40) / CAMERA.mpp;
+    const a=(L.frontBearing??0)*Math.PI/180, [dx,dy]=enuToPixel([Math.sin(a)*25,Math.cos(a)*25,0]);
+    const facing=L.frontBearing === undefined ? "" : ` Front/entrance direction: from this anchor toward (${Math.round(px-x0+dx)}, ${Math.round(py-y0+dy)}) px. Keep the real orientation even if the front is hidden from this camera.`;
     if (px + radius >= x0 && px - radius < x0 + WIN && py + radius >= y0 && py - radius < y0 + WIN)
-      hints.push(`${L.paintHint} Approximate ground anchor in this window: (${Math.round(px-x0)}, ${Math.round(py-y0)}) px. Follow the rendered footprint; if it crosses an edge draw ONLY the clipped part, never recenter or duplicate it.`);
+      hints.push(`${L.paintHint} Approximate ground anchor in this window: (${Math.round(px-x0)}, ${Math.round(py-y0)}) px.${facing} Follow the rendered footprint; if it crosses an edge draw ONLY the clipped part, never recenter or duplicate it.`);
   }
   return hints;
 }
@@ -316,7 +338,7 @@ async function paintWindow(i: number, j: number) {
     let img = sharp(SEA).resize(WIN, WIN);
     if ((i + j) & 1) img = img.flop();
     if (j & 1) img = img.flip();
-    await writeAtomic(img.png(), winFile(i, j));
+    await writeAtomic(img.png(), localWinFile(i, j));
     console.log(`  ${i}_${j}: sea texture`);
     return;
   }
@@ -370,7 +392,7 @@ async function paintWindow(i: number, j: number) {
         continue;
       }
       const warp = structured && r.score > r.identity + 0.01;
-      await applyRegistration(join(work, "out.png"), winFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
+      await applyRegistration(join(work, "out.png"), localWinFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
       console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${r.score.toFixed(2)}`
         + (structured ? "" : " (low texture)") + (warp ? ` shift=(${r.dx},${r.dy}) scale=${r.scale.toFixed(2)}` : ""));
       // keep qa.json + codex.log for debugging; the images are ~6 MB per window
@@ -460,6 +482,13 @@ async function harmoniseSea() {
 }
 
 async function assemble(all = false) {
+  const windowFiles = paletteFiles();
+  const palette = await windowPalette(windowFiles);
+  const seams = palette.residuals.filter(r=>r.error>12);
+  writeFileSync(join(base,"palette-qa.json"),JSON.stringify({offsets:Object.fromEntries(palette.offsets),residuals:palette.residuals},null,2));
+  if(seams.length) throw new Error(`palette QA: ${seams.length} incompatible overlaps; repaint windows listed in palette-qa.json before export`);
+  // A new neighbour can change the component correction. Rebuild all complete tiles together.
+  all = true;
   const ramp = new Float32Array(WIN);
   // 0 → 1 across a FEATHER-wide band centred in the overlap (complementary for neighbours)
   const edge = (k: number) => Math.min(1, Math.max(0, (k + 0.5 - (OVERLAP - FEATHER) / 2) / FEATHER));
@@ -478,6 +507,7 @@ async function assemble(all = false) {
     const acc = new Float32Array(T * T * 3), wsum = new Float32Array(T * T);
     for (const [i, j] of covering) {
       const px = await sharp(winFile(i, j)).resize(WIN, WIN).removeAlpha().raw().toBuffer();
+      applyPalette(px, palette.offsets.get(`${i}_${j}`) ?? [0,0,0]);
       const fix = seaFix.get(`${i}_${j}`);
       if (fix) { // bilinear cell weights × colour offset
         const [w, off] = fix, m = WIN / CELL;
@@ -528,7 +558,7 @@ async function main() {
     wins = old;
   }
   if (args.plan) return console.log(`${wins.length} windows`);
-  if (args.assemble) { await harmoniseSea(); return assemble(true); }
+  if (args.assemble) { /* palette QA in assemble covers water and land together */ return assemble(true); }
   // single-window mode: paint just that cell and assemble once (no 9000 empty rings)
   if (args.window) {
     const [wi, wj] = wins[0];
@@ -584,7 +614,7 @@ async function main() {
     }
     if (painted) await assemble(); // finished tiles become visible ring by ring
   }
-  await harmoniseSea(); // then every tile with open water is rebuilt with the harmonised sea
+  /* palette QA in assemble covers water and land together */ // then every tile with open water is rebuilt with the harmonised sea
   await assemble(!args.window);
   writeFileSync(join(base, "paint.json"), JSON.stringify({ updated: new Date().toISOString() }));
 }
