@@ -22,3 +22,4 @@ web/public/regions/
 # Agent skills (local)
 .agents/
 .vercel
+.env*
