@@ -191,7 +191,7 @@ const out = join(DERIVED, name, "scene");
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
-type Building = { ring: P2[]; h: number; s: number; g: number | null; landmark?: boolean };
+type Building = { ring: P2[]; h: number; s: number; g: number | null; keepInPlaza?: boolean };
 const buildings: Building[] = [];
 const tlvCover: P2[][] = [];
 
@@ -279,7 +279,7 @@ for (const el of osm.elements) {
     }
     // secondary outers of a multipolygon (arcade wings, annexes) stay a bit lower than the main mass
     if (lh && !isFountain && !t.height && !levels && part > 0) h = Math.max(8, h * 0.55);
-    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null, landmark: !!lh });
+    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null, keepInPlaza: !!lh || !!t.name || !!t["name:en"] });
     osmCount++;
     part++;
   }
@@ -289,13 +289,13 @@ console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
 // Clear clutter from monument plazas. Piazza Venezia and the Colosseum valley must stay open:
 // OSM stubs / kiosks / wrong outers otherwise extrude as apartment blocks and paint invents more.
 {
-  const plazas: Array<{ lat: number; lon: number; r: number; minH: number; label: string }> = [
+  const plazas: Array<{ lat: number; lon: number; r: number; label: string }> = [
     // Remove only small anonymous low stubs, never real palaces, porticoes or named arches.
-    { lat: 41.894687, lon: 12.483066, r: 115, minH: 55, label: "Altare/Piazza Venezia" },
+    { lat: 41.894687, lon: 12.483066, r: 115, label: "Altare/Piazza Venezia" },
     // keep Colosseum amphitheatre (~48 m); strip modern infill / stubs in the valley park
-    { lat: 41.89021, lon: 12.492231, r: 130, minH: 40, label: "Colosseo park" },
+    { lat: 41.89021, lon: 12.492231, r: 130, label: "Colosseo park" },
     // keep Palazzo Poli; clear kiosk/stub clutter in Piazza di Trevi so paint doesn't invent a tiny fountain
-    { lat: 41.900978, lon: 12.483285, r: 45, minH: 22, label: "Trevi piazza" },
+    { lat: 41.900978, lon: 12.483285, r: 45, label: "Trevi piazza" },
   ];
   let dropped = 0;
   for (const P of plazas) {
@@ -304,7 +304,7 @@ console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
       const b = buildings[i];
       const cx = b.ring.reduce((a, p) => a + p[0], 0) / b.ring.length;
       const cy = b.ring.reduce((a, p) => a + p[1], 0) / b.ring.length;
-      if (!b.landmark && Math.abs(area2(b.ring)) < 80 && b.h < 8
+      if (!b.keepInPlaza && Math.abs(area2(b.ring)) < 80 && b.h < 8
         && Math.hypot(cx - c[0], cy - c[1]) < P.r) {
         buildings.splice(i, 1);
         dropped++;
