@@ -99,8 +99,9 @@ const LANDMARK_H: Record<string, number> = {
   pantheon: 43,
   "castel sant'angelo": 48,
   "castle of the holy angel": 48,
-  "fontana di trevi": 26,
-  "trevi fountain": 26,
+  "palazzo poli": 26,
+  "fontana di trevi": 1,
+  "trevi fountain": 1,
   "basilica di san pietro": 136.6,
   "st. peter's basilica": 136.6,
   "arco di costantino": 21,
@@ -142,7 +143,8 @@ function sameLL(a: number[], b: number[], eps = 1e-10) {
  * Open outer ways (Fontana di Trevi, etc.) are chained into closed rings by endpoint.
  */
 function outerRings(el: any): number[][][] {
-  if (el.type === "way" && el.geometry?.length >= 4)
+  if (el.type === "way" && el.geometry?.length >= 4
+    && el.geometry[0].lat === el.geometry.at(-1).lat && el.geometry[0].lon === el.geometry.at(-1).lon)
     return [el.geometry.map((q: any) => [q.lon, q.lat])];
   if (el.type !== "relation" || !el.members) return [];
   const segs: number[][][] = [];
@@ -189,7 +191,7 @@ const out = join(DERIVED, name, "scene");
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
-type Building = { ring: P2[]; h: number; s: number; g: number | null };
+type Building = { ring: P2[]; h: number; s: number; g: number | null; landmark?: boolean };
 const buildings: Building[] = [];
 const tlvCover: P2[][] = [];
 
@@ -233,7 +235,7 @@ for (const el of osm.elements) {
   if (el.type === "node" && t.natural === "tree") { const p = toEnu(el.lon, el.lat); trees.push([p[0], p[1], 3, 6]); continue; }
   // buildings + named fountains/monuments that OSM maps without building=* (e.g. Fontana di Trevi)
   const isFountain = t.amenity === "fountain" || t.fountain === "yes";
-  const isMonument = !t.building && (t.historic === "monument" || t.historic === "memorial" || t.tourism === "attraction")
+  const isMonument = !t.building && !t.highway && (t.historic === "monument" || t.historic === "memorial" || t.tourism === "attraction")
     && (t.name || t["name:en"]);
   if (t.building === "roof" || t.location === "underground") continue;
   const levels = parseFloat(t["building:levels"]);
@@ -267,15 +269,17 @@ for (const el of osm.elements) {
   for (const ring of kept) {
     const c: P2 = [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length];
     if (covered(c)) continue;
-    let h = lh || parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0);
+    // OSM rings already encode geographic orientation: never rotate an entire footprint
+    // to expose a facade to the camera. Real tagged heights precede fallback massing.
+    let h = parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0) || lh;
     if (!h) {
       if (isFountain) h = 4;
       else if (["house", "garage", "shed", "kiosk"].includes(t.building)) h = 5;
       else h = Math.abs(area2(ring)) > 1500 ? 14 : 13;
     }
     // secondary outers of a multipolygon (arcade wings, annexes) stay a bit lower than the main mass
-    if (lh && part > 0) h = Math.max(8, h * 0.55);
-    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null });
+    if (lh && !isFountain && !t.height && !levels && part > 0) h = Math.max(8, h * 0.55);
+    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null, landmark: !!lh });
     osmCount++;
     part++;
   }
@@ -286,7 +290,7 @@ console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
 // OSM stubs / kiosks / wrong outers otherwise extrude as apartment blocks and paint invents more.
 {
   const plazas: Array<{ lat: number; lon: number; r: number; minH: number; label: string }> = [
-    // keep only Vittoriano mass (~70 m); Assicurazioni / Palazzo Venezia sit ~120 m+ out
+    // Remove only small anonymous low stubs, never real palaces, porticoes or named arches.
     { lat: 41.894687, lon: 12.483066, r: 115, minH: 55, label: "Altare/Piazza Venezia" },
     // keep Colosseum amphitheatre (~48 m); strip modern infill / stubs in the valley park
     { lat: 41.89021, lon: 12.492231, r: 130, minH: 40, label: "Colosseo park" },
@@ -300,7 +304,8 @@ console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
       const b = buildings[i];
       const cx = b.ring.reduce((a, p) => a + p[0], 0) / b.ring.length;
       const cy = b.ring.reduce((a, p) => a + p[1], 0) / b.ring.length;
-      if (Math.hypot(cx - c[0], cy - c[1]) < P.r && b.h < P.minH) {
+      if (!b.landmark && Math.abs(area2(b.ring)) < 80 && b.h < 8
+        && Math.hypot(cx - c[0], cy - c[1]) < P.r) {
         buildings.splice(i, 1);
         dropped++;
       }
