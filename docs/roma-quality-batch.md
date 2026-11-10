@@ -70,6 +70,19 @@ Limite preesistente: `npm run typecheck` chiama `astro check`, che in questa com
 
 Non lanciare questi comandi in parallelo ai vecchi paint/export/watchers. Prima controllare `pgrep -fl 'paint.ts|render.ts|export.ts|publish.ts|paint-parallel|paint-phase2|finish-watcher|final-publish'` e i log in `/tmp/mondo-logs`: lasciare terminare i job utili e impedire che un vecchio watcher esegua un rilascio autonomo. Non cancellare `data/`, cache o `web-state/` per ripartire.
 
+Il push remoto da questa sessione è bloccato: terminale senza credenziali e connessione GitHub con errore 403 sulla scrittura. Il bundle consegnato contiene tutti i commit del branch sopra `d403cda`. Per importarlo (file scaricato in `~/Downloads`), controllare prima che non esista già un branch locale omonimo divergente; non usare `--force`:
+
+```sh
+cd /Users/domenicogagliardi/Desktop/mondoisometrico
+git fetch origin main
+git fetch ~/Downloads/mondoisometrico-roma-quality-batch.bundle refs/heads/fix/roma-quality-batch:refs/heads/fix/roma-quality-batch
+git switch fix/roma-quality-batch
+git push -u origin fix/roma-quality-batch
+gh pr create --draft --base main --head fix/roma-quality-batch --title "Roma: traffic safety, landmark orientation and complete paint gates" --body-file docs/roma-pr.md
+```
+
+Il push pubblica solo codice e non avvia Vercel con la configurazione del branch. Non sostituisce il rilascio R2 delle immagini. Se la PR è stata già aperta da un collaboratore, non crearne una seconda.
+
 Dopo avere salvato eventuali modifiche locali al codice, selezionare il branch della PR (oppure `main` dopo il merge approvato). Non fare reset forzati. `.env` deve essere quella esistente sul Mac, con `CHROME_PATH`, `TILES_ORIGIN` e autenticazioni già configurate.
 
 ```sh
