@@ -61,7 +61,7 @@ export class Traffic {
   constructor(roads: Road[], private enu2px: number[][], private camFwd: [number, number], density = 1) {
     for (const r of roads) {
       const n = r.s.length / 4;
-      if (n < 2) continue;
+      if (n < 2 || !Number.isInteger(n) || r.s.some((v) => !Number.isFinite(v))) continue;
       const cum = new Float32Array(n);
       for (let i = 1; i < n; i++)
         cum[i] = cum[i - 1] + Math.hypot(r.s[i * 4] - r.s[i * 4 - 4], r.s[i * 4 + 1] - r.s[i * 4 - 3]);
@@ -78,6 +78,7 @@ export class Traffic {
     // "not too many": ~1 vehicle per 55 weighted metres (only on-screen ones are drawn)
     const weights = this.ways.map((w) => w.len * CLASS_WEIGHT[w.r.c]);
     const total = weights.reduce((a, b) => a + b, 0);
+    if (!Number.isFinite(total) || total <= 0) return;
     const count = Math.round(Math.min(5000, Math.max(80, (total / 55) * density)));
     this.regroup();
     for (let i = 0, tries = 0; this.vehicles.length < count && tries < count * 4; tries++) {
@@ -91,7 +92,7 @@ export class Traffic {
       // skip ways that are mostly occluded / water-hidden (cars must not spawn in the river)
       if (this.wayVisible(way) < 0.55) continue;
       const s = len / 2 + this.rand() * (way.len - len);
-      if (!this.sampleVisible(way, s)) continue; // exact spawn point must be on visible asphalt
+      if (!this.sampleVisible(way, s, dir, len)) continue; // exact spawn point must be on visible asphalt
       const lane = bus ? 0 : Math.floor(this.rand() * way.r.l);
       // never spawn on top of another vehicle
       const group = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
@@ -142,20 +143,28 @@ export class Traffic {
     return tot ? vis / tot : 0;
   }
 
-  /** True if the sample nearest `dist` along the way (travel metres) is visible with neighbours. */
-  private sampleVisible(way: Way, dist: number) {
+  /** Require the entire body interval, in travel coordinates, to have safe samples.
+   * Check every covered segment (also for sparse/short ways), not just the centre.
+   */
+  private sampleVisible(way: Way, dist: number, dir: 1 | -1, length: number) {
+    const center = dir === 1 ? dist : way.len - dist;
+    const lo = center - length / 2, hi = center + length / 2;
+    if (lo < 0 || hi > way.len) return false;
     const S = way.r.s;
-    const s = Math.max(0, Math.min(way.len, dist));
-    let i = 1;
-    while (i < way.n - 1 && way.cum[i] < s) i++;
-    const i0 = Math.max(0, i - 1), i1 = Math.min(way.n - 1, i + 1);
-    return !!(S[i * 4 + 3] && S[i0 * 4 + 3] && S[i1 * 4 + 3]);
+    for (let i = 1; i < way.n; i++) {
+      if (way.cum[i] < lo || way.cum[i - 1] > hi) continue;
+      const span = way.cum[i] - way.cum[i - 1];
+      if (span <= 0 || span > 6.1 || S[(i - 1) * 4 + 3] !== 1 || S[i * 4 + 3] !== 1) return false;
+      if (Math.abs(S[i * 4 + 2] - S[(i - 1) * 4 + 2]) > Math.min(2.2, span * 0.2)) return false;
+    }
+    return true;
   }
 
   private chooseNext(v: Vehicle) {
     const options = (this.out.get(this.endNode(v)) ?? []).filter((o) => o.w !== v.w);
     // Never route onto mostly-hidden / river-dipped ways (cars would sit in water or float).
-    const drivable = options.filter((o) => this.wayVisible(this.ways[o.w]) >= 0.55);
+    const drivable = options.filter((o) => this.wayVisible(this.ways[o.w]) >= 0.55
+      && this.sampleVisible(this.ways[o.w], v.len / 2, o.dir, v.len));
     const pool = (v.bus ? drivable.filter((o) => this.ways[o.w].r.c <= 3) : drivable);
     const from = pool.length ? pool : drivable;
     if (!from.length) return null;
@@ -264,7 +273,7 @@ export class Traffic {
       const start = (this.nodeR.get(dir === 1 ? way.r.a : way.r.b) ?? 4) + v.len / 2;
       if (way.r.c > 3 || way.len < start + v.len + 30 || (v.bus && way.r.c > 2)) continue;
       if (this.wayVisible(way) < 0.55) continue; // no river / occluded respawns
-      if (!this.sampleVisible(way, start)) continue;
+      if (!this.sampleVisible(way, start, dir, v.len)) continue;
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false });
@@ -283,6 +292,7 @@ export class Traffic {
 
   /** Draw vehicles. `toScreen` maps global art px -> canvas px; `px` = canvas px per art px. */
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
+    this.drawn = 0;
     if (px < 0.28) return; // only when asphalt is clearly readable — no fleas on roofs at mid zoom
     const [vx0, vy0, vx1, vy1] = view;
     const M = this.enu2px;
@@ -297,15 +307,8 @@ export class Traffic {
         while (i < way.n - 1 && way.cum[i] < s) i++;
         return { i, s };
       };
-      // Whole body + neighbours must sit on visible road — else cars appear on roofs / in the river.
-      const mid = at(v.s), nose = at(v.s + v.len * 0.45 * v.dir), tail = at(v.s - v.len * 0.45 * v.dir);
-      const flankA = at(v.s + v.len * 0.2 * v.dir), flankB = at(v.s - v.len * 0.2 * v.dir);
-      const vis = (i: number) => {
-        const i0 = Math.max(0, i - 1), i1 = Math.min(way.n - 1, i + 1);
-        return S[i * 4 + 3] && S[i0 * 4 + 3] && S[i1 * 4 + 3];
-      };
-      if (!vis(mid.i) || !vis(nose.i) || !vis(tail.i) || !vis(flankA.i) || !vis(flankB.i)) continue;
-      const { i, s } = mid, k0 = (i - 1) * 4, k1 = i * 4;
+      if (!this.sampleVisible(way, v.s, v.dir, v.len)) continue;
+      const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
       const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
       let dx = S[k1] - S[k0], dy = S[k1 + 1] - S[k0 + 1];
       const L = Math.hypot(dx, dy) || 1;
@@ -387,15 +390,15 @@ export class Traffic {
       if (nx * this.camFwd[0] + ny * this.camFwd[1] >= 0) return;
       rgb(k);
       poly([
-        [a[0], a[1], zTop] as Vec3, [b[0], b[1], zTop] as Vec3,
-        [b[0], b[1], zBot] as Vec3, [a[0], a[1], zBot] as Vec3,
+        [a[0], a[1], c[2] + zTop] as Vec3, [b[0], b[1], c[2] + zTop] as Vec3,
+        [b[0], b[1], c[2] + zBot] as Vec3, [a[0], a[1], c[2] + zBot] as Vec3,
       ]);
     };
     for (let i = 0; i < body.length; i++) {
       const a = body[i], b = body[(i + 1) % body.length];
       flank(a, b, z0, zBelt, 0.68 + 0.08 * (i % 2));
     }
-    rgb(0.88); poly(body.map((p) => [p[0], p[1], zBelt] as Vec3)); // belt / hood plane
+    rgb(0.88); poly(body.map((p) => [p[0], p[1], c[2] + zBelt] as Vec3)); // belt / hood plane
     // cabin sides + roof
     for (let i = 0; i < 4; i++) {
       const a = cabin[i], b = cabin[(i + 1) % 4];
@@ -463,7 +466,7 @@ export class Traffic {
     const ground = 0.12, z0 = ground + 0.2, zBelt = ground + v.hei * 0.45, zRoof = ground + v.hei;
     const nose = hl * 0.95, tail = -hl * 0.95;
     const body = [pt(nose, hw, zBelt), pt(nose, -hw, zBelt), pt(tail, -hw, zBelt), pt(tail, hw, zBelt)];
-    const roof = body.map((p) => [p[0], p[1], zRoof] as Vec3);
+    const roof = [pt(nose, hw, zRoof), pt(nose, -hw, zRoof), pt(tail, -hw, zRoof), pt(tail, hw, zRoof)];
     for (let i = 0; i < 4; i++) {
       const a = body[i], b = body[(i + 1) % 4];
       const nx = (b[1] - a[1]), ny = -(b[0] - a[0]);

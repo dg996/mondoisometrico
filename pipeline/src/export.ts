@@ -27,10 +27,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { join } from "node:path";
 import sharp from "sharp";
 import { AREAS, GROUND_H, areaPolygon, insideDistance, openArea } from "./areas.ts";
-import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, llhToPixel } from "./camera.ts";
+import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, llhToPixel, enuHeight } from "./camera.ts";
 import { HOSTING } from "./hosting.ts";
 import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
 import { CITIES, REGIONS } from "./places.ts";
+import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, type TerrainMeta, type Point } from "./road-safety.ts";
 import { readHeights } from "./heights.ts";
 
 const TS = 512;                  // web tile size
@@ -157,7 +158,7 @@ async function readTile(layer: string, z: number, x: number, y: number): Promise
  */
 type Deck = { y: number; w: number; m: number; pts: Array<[number, number]>; box: number[] };
 let decks: Deck[] = [];
-const DECK_STYLE = "decks3"; // bump to re-export painted tiles after changing the deck drawing
+const DECK_STYLE = "decks4-ground-anchors"; // bump to re-export painted tiles after changing the deck drawing
 function bridgeDecks(ways: Array<{ y: number; w: number; l: number; s: number[] }>) {
   decks = [];
   for (const w of ways) {
@@ -225,7 +226,7 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
     const painted = layer === "map" && file.includes("/paint/");
     const m = statSync(file).mtimeMs;
     // RAW_DIM_TAG forces a rewrite of unpainted map tiles when the fog strength changes
-    const stamp = `${file}@${m}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : `@${RAW_DIM_TAG}`}@${FORMAT}${QUALITY}`;
+    const stamp = `${file}@${m}@${layer === "map" ? hash(JSON.stringify(decks)) : ""}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : `@${RAW_DIM_TAG}`}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
@@ -377,11 +378,19 @@ async function exportRoads(areas: string[], heights: Heights) {
   for (const a of areas) {
     const f = join(RAW, a, "roads.json");
     if (!existsSync(f)) continue;
+    const groundDir = join(DERIVED, a, "ground");
+    const meta = readJson<TerrainMeta>(join(groundDir, "meta.json"));
+    const bytes = readFileSync(join(groundDir, "height.bin"));
+    const terrain = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    if (terrain.length !== meta.nx * meta.ny) throw new Error(`invalid terrain grid: ${a}`);
+    const water = readJson<Array<{ k: string; r?: Point[][] }>>(join(groundDir, "features.json"))
+      .filter(f => ["water", "sea", "pool"].includes(f.k) && f.r).map(f => f.r!);
+    const waterAt = (x: number, y: number) => inWater(x, y, water);
     const els = readJson(f).elements.filter((el: any) => {
       const t = el.tags ?? {};
       if (seen.has(el.id)) return false;
       seen.add(el.id);
-      return el.geometry?.length >= 2 && t.tunnel !== "yes" && !String(t.layer ?? "").startsWith("-") && roadWidth(t) > 0;
+      return el.geometry?.length >= 2 && (!t.tunnel || t.tunnel === "no") && (!t.covered || t.covered === "no") && !String(t.layer ?? "").startsWith("-") && roadWidth(t) > 0;
     });
     // split ways at every node another road shares, so junctions are always way ends
     const use = new Map<number, number>();
@@ -394,22 +403,21 @@ async function exportRoads(areas: string[], heights: Heights) {
       for (let end = 1; end < el.nodes.length; end++) {
         if (end < el.nodes.length - 1 && (use.get(el.nodes[end]) ?? 0) < 2) continue;
         const pts = el.geometry.slice(start, end + 1).map((p: any) => ({ lat: p.lat, lon: p.lon, e: ecefToEnu(llhToEcef(p.lat, p.lon, 0)) }));
-        const samples: number[] = [];
+        const samples: number[] = [], waterSamples: boolean[] = [];
         for (let i = 0; i < pts.length - 1; i++) {
           const a0 = pts[i], b0 = pts[i + 1];
-          const n = Math.max(1, Math.ceil(Math.hypot(b0.e[0] - a0.e[0], b0.e[1] - a0.e[1]) / 6));
+          const n = Math.max(1, Math.ceil(Math.hypot(b0.e[0] - a0.e[0], b0.e[1] - a0.e[1]) / 2));
           for (let k = 0; k < n + (i === pts.length - 2 ? 1 : 0); k++) {
             const f2 = k / n, lat = a0.lat + (b0.lat - a0.lat) * f2, lon = a0.lon + (b0.lon - a0.lon) * f2;
-            const g = await onGround(heights, lat, lon);
-            const surf = heights.at(g.x, g.y);
-            // Tight occlusion: cars must not sit on rooftops when the heightmap rises above the road.
-            const vis = surf === null || surf <= g.h + 1.0 ? 1 : 0;
-            total++; occluded += 1 - vis;
-            const e = ecefToEnu(llhToEcef(lat, lon, g.h));
-            samples.push(Math.round(e[0] * 10) / 10, Math.round(e[1] * 10) / 10, Math.round(e[2] * 10) / 10, vis);
+            const e = ecefToEnu(llhToEcef(lat, lon, 0));
+            const up = groundAt(meta, terrain, e[0], e[1]);
+            total++;
+            samples.push(Math.round(e[0]*10)/10, Math.round(e[1]*10)/10, up === null ? 0 : Math.round(up*10)/10, up === null ? 0 : 1);
+            waterSamples.push(waterAt(e[0], e[1]));
           }
         }
         ways.push({
+          bridge: !!t.bridge && t.bridge !== "no", water: waterSamples, waterAt,
           y: Number(t.layer) || (t.bridge && t.bridge !== "no" ? 1 : 0),
           c: cls, o: t.oneway === "-1" ? -1 : isOneway(t) ? 1 : 0,
           l: roadLanes(t), w: Math.round(width * 10) / 10, a: el.nodes[start], b: el.nodes[end], s: samples,
@@ -418,22 +426,29 @@ async function exportRoads(areas: string[], heights: Heights) {
       }
     }
   }
-  occluded += hideUnderBridges(ways);
-  // Untagged Tiber crossings still follow the riverbed DEM — promote + flatten so decks stay level.
-  promoteRiverCrossings(ways);
-  // Bridges: DEM dips into the river under the deck → curved roads + cars in the water.
-  // Snap mid-span samples up to a flat deck between the bank approaches.
+  // Resolve altitude before testing screen-space occlusion. A missing height pass is unsafe.
   flattenBridgeDecks(ways);
-  // Ground roads that still plunge into a water trough (bad DEM / missing bridge tag): hide them.
-  occluded += hideWaterDips(ways);
-  // Any sample still far below its own way's bank heights (riverbed / floating) — never drive there.
-  occluded += hideBelowBanks(ways);
-  // nothing drives or walks in the faded margin outside the painted map
+  hideBelowBanks(ways);
+  hideUnderBridges(ways);
   for (const w of ways) for (let k = 0; k < w.s.length; k += 4) {
-    if (!w.s[k + 3]) continue;
-    const [x, y] = enuToPixel([w.s[k], w.s[k + 1], w.s[k + 2]]);
-    if (edgeDistance(x, y) < (EDGE0 + EDGE1) / 2) { w.s[k + 3] = 0; occluded++; }
+    if (!w.s[k+3]) continue;
+    const a=Math.max(0,k-4), b=Math.min(w.s.length-4,k+4);
+    const dx=w.s[b]-w.s[a], dy=w.s[b+1]-w.s[a+1], length=Math.hypot(dx,dy);
+    if (!length) { w.s[k+3]=0; continue; }
+    // Whole carriageway, not only its centre: lane offsets must not escape onto water/roofs.
+    const steps=Math.max(1,Math.ceil(w.w));
+    for(let j=0;j<=steps;j++) {
+      const off=w.w*(j/steps-0.5);
+      const p: [number,number,number]=[w.s[k]+dy/length*off,w.s[k+1]-dx/length*off,w.s[k+2]];
+      const [x,y]=enuToPixel(p);
+      await heights.ensure(x,y);
+      const surf=heights.at(x,y);
+      if ((!w.bridge && w.waterAt(p[0],p[1])) || surf===null || surf>enuHeight(p)+1
+        || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
+        || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
+    }
   }
+  occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);
   bridgeDecks(ways);
   writeData("roads", JSON.stringify(encodeRoads(ways)));
   console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
@@ -466,90 +481,6 @@ function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a
     out.vis.push(runs.length, ...runs);
   }
   return out;
-}
-
-/**
- * Ways that plunge into a riverbed mid-span (missing bridge=yes / layer) still need deck treatment.
- */
-function promoteRiverCrossings(ways: Array<{ y: number; s: number[] }>) {
-  for (const w of ways) {
-    if (w.y > 0) continue;
-    const n = w.s.length / 4;
-    if (n < 6) continue;
-    const u0 = w.s[2], u1 = w.s[(n - 1) * 4 + 2];
-    const bank = Math.max(u0, u1);
-    let midMin = Infinity;
-    for (let i = Math.floor(n * 0.22); i < Math.ceil(n * 0.78); i++) midMin = Math.min(midMin, w.s[i * 4 + 2]);
-    if (bank - midMin > 3.5) w.y = 1;
-  }
-}
-
-/**
- * Keep bridge decks level. Copernicus DEM follows the riverbed under Ponte Vittorio / etc., so
- * sampling ground height along a bridge makes the road (and traffic) dive into the water.
- */
-function flattenBridgeDecks(ways: Array<{ y: number; s: number[] }>) {
-  for (const w of ways) {
-    if (w.y <= 0) continue;
-    const n = w.s.length / 4;
-    if (n < 4) continue;
-    const band = Math.max(1, Math.floor(n * 0.15));
-    let h0 = -Infinity, h1 = -Infinity;
-    for (let i = 0; i < band; i++) h0 = Math.max(h0, w.s[i * 4 + 2]);
-    for (let i = n - band; i < n; i++) h1 = Math.max(h1, w.s[i * 4 + 2]);
-    if (!Number.isFinite(h0) || !Number.isFinite(h1)) continue;
-    // Flat deck at the higher approach (+1.2 m kerb), short ramps at the banks only.
-    const deck = Math.max(h0, h1) + 1.2;
-    for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);
-      let target = deck;
-      if (t < 0.12) target = h0 + (deck - h0) * (t / 0.12);
-      else if (t > 0.88) target = deck + (h1 - deck) * ((t - 0.88) / 0.12);
-      w.s[i * 4 + 2] = Math.round(Math.max(w.s[i * 4 + 2], target) * 10) / 10;
-    }
-  }
-}
-
-/** Hide ground-road samples that plunge >1.5 m below the chord between way ends (river / quarry dips). */
-function hideWaterDips(ways: Array<{ y: number; s: number[] }>) {
-  let n = 0;
-  for (const w of ways) {
-    if (w.y > 0) continue;
-    const m = w.s.length / 4;
-    if (m < 3) continue;
-    const u0 = w.s[2], u1 = w.s[(m - 1) * 4 + 2];
-    for (let i = 1; i < m - 1; i++) {
-      const chord = u0 + (u1 - u0) * (i / (m - 1));
-      if (w.s[i * 4 + 2] < chord - 1.5 && w.s[i * 4 + 3]) {
-        w.s[i * 4 + 3] = 0;
-        n++;
-      }
-    }
-  }
-  return n;
-}
-
-/**
- * Hide samples sitting in a trough relative to the way's own approach heights.
- * Catches river-bed samples that survive flatten (partial bridges, service tracks into water).
- */
-function hideBelowBanks(ways: Array<{ s: number[] }>) {
-  let n = 0;
-  for (const w of ways) {
-    const m = w.s.length / 4;
-    if (m < 4) continue;
-    const band = Math.max(1, Math.floor(m * 0.2));
-    let bank = -Infinity;
-    for (let i = 0; i < band; i++) bank = Math.max(bank, w.s[i * 4 + 2]);
-    for (let i = m - band; i < m; i++) bank = Math.max(bank, w.s[i * 4 + 2]);
-    if (!Number.isFinite(bank)) continue;
-    for (let i = 0; i < m; i++) {
-      if (!w.s[i * 4 + 3]) continue;
-      // >2.5 m below bank approaches → in the river / under a collapsed DEM
-      if (w.s[i * 4 + 2] < bank - 2.5) { w.s[i * 4 + 3] = 0; n++; }
-    }
-  }
-  return n;
 }
 
 /**
@@ -718,6 +649,7 @@ async function main() {
     }
   }
   const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
+  paintedArt = new Set(art.keys());
   await exportRoads(areas, heights); // first: the bridge decks are drawn into the painted tiles
   if (!process.argv.includes("--data-only")) {
     paintedArt = new Set(art.keys());
