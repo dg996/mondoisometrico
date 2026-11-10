@@ -30,7 +30,7 @@ const R_EARTH = 6371000;
  * k: kind (drawn by page/renderer.ts), r: polygon rings (even-odd) or l: polyline,
  * w: line width (m), o: one-way, n: lanes, y: layer (bridges above)
  */
-export interface Feature { k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
+export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
 
 const name = process.argv[2] ?? "roma-core";
 const area = openArea(name);
@@ -180,7 +180,7 @@ for (const el of osm.elements) {
         nodeUse.set(id, nd);
       } else if (path && el.nodes && t.highway !== "steps") for (const id of el.nodes) footNodes.add(id);
       if (road && el.nodes) el.geometry.forEach((q: any, k: number) => nodePos.set(el.nodes[k], [toEnu(q.lon, q.lat), k > 0 ? toEnu(el.geometry[k - 1].lon, el.geometry[k - 1].lat) : toEnu(el.geometry[k + 1].lon, el.geometry[k + 1].lat), w]));
-      const f: Feature = { k: kind, l, w: r1(w) };
+      const f: Feature = { id: el.id, bridge: !!t.bridge && t.bridge !== "no", k: kind, l: g, w: r1(w) };
       if (oneway) f.o = 1;
       if (lanes) f.n = lanes;
       if (layer > 0) f.y = layer;

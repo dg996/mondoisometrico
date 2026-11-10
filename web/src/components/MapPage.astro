@@ -40,7 +40,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 		<link rel="manifest" href="/site.webmanifest" />
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-		<meta name="theme-color" content="#0e0f12" />
+		<meta name="theme-color" content="#e8e4dc" />
 		<meta name="color-scheme" content="dark" />
 		<title>{title}</title>
 		{tilesOrigin && <link rel="preconnect" href={tilesOrigin} crossorigin="anonymous" />}
@@ -89,12 +89,12 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<div id="video-credit">{region.credits.map((line, i) => <>{i > 0 && <br />}{line}</>)}</div>
 
 		<style is:global>
-			html, body { margin: 0; height: 100%; background: #0e0f12; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden;
+			html, body { margin: 0; height: 100%; background: #e8e4dc; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden;
 				overscroll-behavior: none; -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
 			/* the map owns every gesture: no browser pan/pinch/double-tap zoom of the page, no long-press callout */
 			#map { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-			#map { position: fixed; inset: 0; background: #0e0f12; }
-			#preview { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; background: #0e0f12; }
+			#map { position: fixed; inset: 0; background: #e8e4dc; }
+			#preview { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; background: #e8e4dc; }
 			/* landscape: the image is 0.8 × as tall as wide; portrait and squarish screens: 2.2 × (export.ts PREVIEWS) */
 			#preview .frame { position: absolute; left: 0; top: 50%; width: 100%; aspect-ratio: 1 / 0.8; transform: translateY(-50%); }
 			#preview .lqip { position: absolute; inset: 0; background: var(--lqip-land) center / 100% 100%; filter: blur(12px); }

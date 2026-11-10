@@ -31,9 +31,13 @@ import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, l
 import { HOSTING } from "./hosting.ts";
 import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
 import { CITIES, REGIONS } from "./places.ts";
-import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, roadSurfaceSafe, type TerrainMeta, type Point } from "./road-safety.ts";
+import { groundAt, inWater, hideBelowBanks, roadSurfaceSafe, type TerrainMeta, type Point } from "./road-safety.ts";
 import { readHeights } from "./heights.ts";
-import { artCoverage, paintedBounds, parseArtBounds } from "./art-coverage.ts";
+import { artCoverage, renderedCoverage, paintedBounds, parseArtBounds } from "./art-coverage.ts";
+import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
+import { LANDMARKS } from "./landmarks.ts";
+import { landmarkProjector } from "./landmark-anchors.ts";
+import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
 import { parseArgs } from "node:util";
 
 const TS = 512;                  // web tile size
@@ -49,53 +53,11 @@ const MARGIN = 16; // neighbour pixels used when building each zoomed-out tile
 const EDGE0 = 760, EDGE1 = EDGE0 + 1800;
 let outlines: Array<Array<[number, number]>> = [];
 /** web/src/pages/index.astro #map background (#0e0f12): the edge fades into it */
-const BG = [14, 15, 18];
+const BG = CONTEXT_BACKGROUND;
 const edgeDistance = (x: number, y: number) => Math.max(0, ...outlines.map((o) => insideDistance([x, y], o)));
 
-/**
- * Unpainted (3D-render) map tiles stay visible but fogged toward the page background so the
- * AI-painted islands read clearly. Soft band blends into neighbouring painted art tiles.
- * Bump RAW_DIM_TAG after changing these so export rewrites the affected tiles.
- */
-const RAW_KEEP = 0.04;   // unpainted → nearly solid page BG (kill milky “sfocato”)
-const RAW_FEATHER = 24;  // hard cut into painted art — no blurry halo
-const RAW_DIM_TAG = "rawdim4";
-/** Art-tile keys (`tx_ty`) that have a paint/*.png — set in main before exportLayer("map"). */
+/** Exact painted keys also drive the client activity mask. */
 let paintedArt = new Set<string>();
-
-/** How much colour to keep at global art px (1 = full paint, RAW_KEEP = fogged render). */
-function paintKeep(gx: number, gy: number): number {
-  const T = CAMERA.tile;
-  const ax = Math.floor(gx / T), ay = Math.floor(gy / T);
-  if (paintedArt.has(key(ax, ay))) return 1;
-  let best = Infinity;
-  // only nearby painted tiles matter for the feather
-  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-    if (!paintedArt.has(key(ax + dx, ay + dy))) continue;
-    const px = (ax + dx) * T, py = (ay + dy) * T;
-    const ddx = gx < px ? px - gx : gx > px + T ? gx - (px + T) : 0;
-    const ddy = gy < py ? py - gy : gy > py + T ? gy - (py + T) : 0;
-    best = Math.min(best, Math.hypot(ddx, ddy));
-  }
-  if (!Number.isFinite(best) || best >= RAW_FEATHER) return RAW_KEEP;
-  const t = 1 - best / RAW_FEATHER;
-  const s = t * t * (3 - 2 * t);
-  return RAW_KEEP + (1 - RAW_KEEP) * s;
-}
-
-/** Fog unpainted map pixels toward BG (lattice + bilinear, same idea as edgeAlpha). */
-function dimUnpainted(rgb: Buffer, x0: number, y0: number) {
-  const step = 8, n = TS / step + 1, grid = new Float32Array(n * n);
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) grid[j * n + i] = paintKeep(x0 + i * step, y0 + j * step);
-  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
-    const gx = x / step, gy = y / step, i = Math.floor(gx), j = Math.floor(gy), fx = gx - i, fy = gy - j;
-    const keep = (grid[j * n + i] * (1 - fx) + grid[j * n + i + 1] * fx) * (1 - fy)
-      + (grid[(j + 1) * n + i] * (1 - fx) + grid[(j + 1) * n + i + 1] * fx) * fy;
-    if (keep >= 0.999) continue;
-    const p = y * TS + x;
-    for (let c = 0; c < 3; c++) rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * keep);
-  }
-}
 
 /** Native web tile at global art px (x0, y0): fade alpha near the map edge (null = fully inside). */
 function edgeAlpha(x0: number, y0: number): Buffer | null {
@@ -153,53 +115,8 @@ async function readTile(layer: string, z: number, x: number, y: number): Promise
   return b;
 }
 
-/**
- * Road bridges drawn over the paint. Codex sometimes paints rails or lanes running across a bridge
- * deck (the layering is ambiguous in a flat painting); the OSM decks (layer > 0, as projected for the
- * traffic) are laid on top in the painted road style, so a bridge always reads as on top.
- */
-type Deck = { y: number; w: number; m: number; pts: Array<[number, number]>; box: number[] };
-let decks: Deck[] = [];
-const DECK_STYLE = "decks4-ground-anchors"; // bump to re-export painted tiles after changing the deck drawing
-function bridgeDecks(ways: Array<{ y: number; w: number; l: number; s: number[] }>) {
-  decks = [];
-  for (const w of ways) {
-    if (w.y <= 0) continue;
-    let run: Array<[number, number]> = [], scale = 0, n = 0;
-    const flush = () => {
-      if (run.length >= 2) {
-        const xs = run.map((p) => p[0]), ys = run.map((p) => p[1]);
-        decks.push({ y: w.y, w: (w.w * scale) / n, m: scale / n, pts: run, box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] });
-      }
-      run = []; scale = 0; n = 0;
-    };
-    for (let k = 0; k < w.s.length; k += 4) {
-      if (!w.s[k + 3]) { flush(); continue; } // hidden behind a building, under a higher bridge, in the margin
-      const p = enuToPixel([w.s[k], w.s[k + 1], w.s[k + 2]]);
-      run.push([p[0], p[1]]);
-      const k2 = k + 4 < w.s.length ? k + 4 : k - 4;
-      const dx = w.s[k2] - w.s[k], dy = w.s[k2 + 1] - w.s[k + 1], L = Math.hypot(dx, dy) || 1;
-      const q = enuToPixel([w.s[k] - dy / L, w.s[k + 1] + dx / L, w.s[k + 2]]); // 1 m across the deck
-      scale += Math.hypot(q[0] - p[0], q[1] - p[1]); n++;
-    }
-    flush();
-  }
-  decks.sort((a, b) => a.y - b.y);
-}
-/** SVG of the bridge decks crossing a web tile at global px (x0, y0), or null */
-function deckSvg(x0: number, y0: number) {
-  const hit = decks.filter((d) => d.box[0] < x0 + TS + d.w && d.box[2] > x0 - d.w && d.box[1] < y0 + TS + d.w && d.box[3] > y0 - d.w);
-  if (!hit.length) return null;
-  const line = (d: Deck, color: string, width: number, extra = "") =>
-    `<polyline points="${d.pts.map(([x, y]) => `${(x - x0).toFixed(1)},${(y - y0).toFixed(1)}`).join(" ")}" fill="none" stroke="${color}" stroke-width="${width.toFixed(1)}" stroke-linejoin="round" ${extra}/>`;
-  const body = hit.map((d) => {
-    const m = d.m; // px per metre across the deck
-    return line(d, "#55565c", d.w + 1.5 * m, 'stroke-linecap="butt"') + line(d, "#e2ddd2", d.w + 0.9 * m, 'stroke-linecap="butt"')
-      + line(d, "#6e7078", d.w, 'stroke-linecap="butt"') + line(d, "#f4f1ea", 0.15 * m, `stroke-dasharray="${3 * m} ${3 * m}"`);
-  }).join("");
-  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${TS}" height="${TS}">${body}</svg>`);
-}
-
+// Bridges are actual geometry in the source render / height pass. Never cover an AI bridge
+// with a second SVG roadway: that produced displaced double decks and broken abutments.
 /** Run tile jobs a few at a time (AVIF encoding is the slow part; sharp works off the main thread). */
 const PARALLEL = 8;
 async function pool(jobs: Array<() => Promise<void>>) {
@@ -223,12 +140,16 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
   let level = new Map<Key, number>(); // key -> source mtime
   let changed = new Set<Key>();
   const jobs: Array<() => Promise<void>> = [];
+  const context = new Map<string, { image: Promise<Buffer>; remaining: number }>();
   for (const [k, file] of sources) {
     const [tx, ty] = parse(k);
     const painted = layer === "map" && file.includes("/paint/");
     const m = statSync(file).mtimeMs;
-    // RAW_DIM_TAG forces a rewrite of unpainted map tiles when the fog strength changes
-    const stamp = `${file}@${m}@${layer === "map" ? hash(JSON.stringify(decks)) : ""}@edge${EDGE0}-${EDGE1}d${painted ? `@${DECK_STYLE}` : `@${RAW_DIM_TAG}`}@${FORMAT}${QUALITY}`;
+    // Neighbour changes invalidate blurred gutters as well as the tile itself.
+    const neighbours = layer === "map" && !painted ? [-1,0,1].flatMap(dy=>[-1,0,1].map(dx=>{
+      const f=sources.get(key(tx+dx,ty+dy)); return f ? `${f}@${statSync(f).mtimeMs}` : "";
+    })).join("|") : "";
+    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${neighbours}@no-svg-decks@edge${EDGE0}-${EDGE1}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
@@ -237,12 +158,15 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
         if (h && prevSources[key(x, y)] === stamp) { hashes[`${NATIVE_Z}/${x}_${y}`] = h; continue; }
         changed.add(key(x, y));
         jobs.push(async () => {
-          let img = sharp(file).extract({ left: i * TS, top: j * TS, width: TS, height: TS });
-          const svg = painted ? deckSvg(x * TS, y * TS) : null;
-          if (svg) img = sharp(await img.png().toBuffer()).composite([{ input: svg }]);
-          const rgb = await img.removeAlpha().raw().toBuffer();
-          // fog geometric render so only AI-painted buildings read as "done"
-          if (layer === "map" && !painted) dimUnpainted(rgb, x * TS, y * TS);
+          let source: string | Buffer = file;
+          if (layer === "map" && !painted) {
+            if (!context.has(k)) context.set(k, {image:contextTile(sources,tx,ty),remaining:SPLIT*SPLIT});
+            const item=context.get(k)!;
+            while(context.size>8) context.delete(context.keys().next().value!);
+            source = await item.image;
+            if(--item.remaining===0) context.delete(k);
+          }
+          const rgb = await sharp(source).extract({ left: i * TS, top: j * TS, width: TS, height: TS }).removeAlpha().raw().toBuffer();
           const alpha = edgeAlpha(x * TS, y * TS);
           // fade baked toward the page background: opaque tiles, so no seams where tiles meet
           if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
@@ -385,8 +309,9 @@ async function exportRoads(areas: string[], heights: Heights) {
     const bytes = readFileSync(join(groundDir, "height.bin"));
     const terrain = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
     if (terrain.length !== meta.nx * meta.ny) throw new Error(`invalid terrain grid: ${a}`);
-    const water = readJson<Array<{ k: string; r?: Point[][] }>>(join(groundDir, "features.json"))
-      .filter(f => ["water", "sea", "pool"].includes(f.k) && f.r).map(f => f.r!);
+    const features = readJson<Array<{ id?:number; bridge?:boolean; l?: Point[]; k: string; r?: Point[][] }>>(join(groundDir, "features.json"));
+    const profiles = new Map(features.filter(f=>f.bridge && f.l).map(f=>[f.id, f.l!]));
+    const water = features.filter(f => ["water", "sea", "pool"].includes(f.k) && f.r).map(f => f.r!);
     const waterAt = (x: number, y: number) => inWater(x, y, water);
     const els = readJson(f).elements.filter((el: any) => {
       const t = el.tags ?? {};
@@ -401,6 +326,9 @@ async function exportRoads(areas: string[], heights: Heights) {
       const t = el.tags ?? {};
       const cls = CLS[String(t.highway).replace("_link", "")] ?? 5;
       const width = roadWidth(t);
+      const isBridge = !!t.bridge && t.bridge !== "no";
+      const bridgeLine = profiles.get(el.id);
+      const deck = isBridge && bridgeLine ? bridgeProfile(bridgeLine,(x,y)=>groundAt(meta,terrain,x,y),waterAt) : null;
       let start = 0;
       for (let end = 1; end < el.nodes.length; end++) {
         if (end < el.nodes.length - 1 && (use.get(el.nodes[end]) ?? 0) < 2) continue;
@@ -412,7 +340,8 @@ async function exportRoads(areas: string[], heights: Heights) {
           for (let k = 0; k < n + (i === pts.length - 2 ? 1 : 0); k++) {
             const f2 = k / n, lat = a0.lat + (b0.lat - a0.lat) * f2, lon = a0.lon + (b0.lon - a0.lon) * f2;
             const e = ecefToEnu(llhToEcef(lat, lon, 0));
-            const up = groundAt(meta, terrain, e[0], e[1]);
+            const up = isBridge ? (deck ? deckHeight(deck,e[0],e[1]) : null)
+              : Number(t.layer)>0 ? null : groundAt(meta, terrain, e[0], e[1]);
             total++;
             samples.push(Math.round(e[0]*10)/10, Math.round(e[1]*10)/10, up === null ? 0 : Math.round(up*10)/10, up === null ? 0 : 1);
             waterSamples.push(waterAt(e[0], e[1]));
@@ -429,7 +358,6 @@ async function exportRoads(areas: string[], heights: Heights) {
     }
   }
   // Resolve altitude before testing screen-space occlusion. A missing height pass is unsafe.
-  flattenBridgeDecks(ways);
   hideBelowBanks(ways);
   hideUnderBridges(ways);
   for (const w of ways) for (let k = 0; k < w.s.length; k += 4) {
@@ -448,7 +376,7 @@ async function exportRoads(areas: string[], heights: Heights) {
         const q: [number,number,number] = [p[0],p[1],p[2]+lift];
         const [x,y]=enuToPixel(q);
         await heights.ensure(x,y);
-        if (!roadSurfaceSafe(heights.at(x,y),enuHeight(q),lift===0 && !w.bridge)
+        if (!roadSurfaceSafe(heights.at(x,y),enuHeight(q),lift===0)
           || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
           || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
       }
@@ -456,7 +384,6 @@ async function exportRoads(areas: string[], heights: Heights) {
     }
   }
   occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);
-  bridgeDecks(ways);
   writeData("roads", JSON.stringify(encodeRoads(ways)));
   console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
 }
@@ -663,14 +590,14 @@ async function main() {
   }
   const playable = requestedBounds ?? paintedBounds(art.keys(), CAMERA.tile);
   if (!playable) throw new Error("no painted tiles: playable area cannot be exported");
-  const coverage = artCoverage(playable, new Set(art.keys()), new Set(photo.keys()), CAMERA.tile);
+  const coverage = (requestedBounds ? artCoverage : renderedCoverage)(playable, new Set(art.keys()), new Set(photo.keys()), CAMERA.tile);
   console.log(`  paint coverage: ${JSON.stringify(coverage)}`);
   if (args["require-painted"] && (coverage.missingPaint.length || coverage.missingRender.length))
     throw new Error("incomplete playable coverage: finish render/paint/assemble before the final export");
   if (args["check-coverage"]) return; // read-only preflight, no roads/tiles/world/state writes
   const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
   paintedArt = new Set(art.keys());
-  await exportRoads(areas, heights); // first: the bridge decks are drawn into the painted tiles
+  await exportRoads(areas, heights);
   if (!args["data-only"]) {
     paintedArt = new Set(art.keys());
     await exportLayer("map", new Map([...photo, ...art])); // painted wins; unpainted fogged
@@ -686,9 +613,13 @@ async function main() {
   const m = CAMERA.mpp;
   // Keep a release rectangle fixed while its gaps are painted; stray painted islands do not expand it.
   const [px0, py0, px1, py1] = playable;
+  const projectLandmark = landmarkProjector(areas);
   const world = JSON.stringify({
     tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
     playable: [[py0, px0], [py1, px1]],
+    activity: { version: 1, tileSize: CAMERA.tile, tiles: [...paintedArt].sort(), bounds: playable },
+    landmarks: Object.fromEntries((LANDMARKS[Object.keys(CITIES).find(c => CITIES[c].region === activeRegion()) ?? ""] ?? [])
+      .map(lm => [lm.name, projectLandmark(lm)])),
     origin: [ox, oy], size: [Math.ceil((x1 - ox) / block) * block, Math.ceil((y1 - oy) / block) * block],
     // ENU meters -> art pixels (linear; ENU origin = pixel origin)
     enu2px: [[r[0] / m, r[1] / m, r[2] / m], [-u[0] / m, -u[1] / m, -u[2] / m]],

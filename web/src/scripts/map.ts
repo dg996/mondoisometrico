@@ -2,13 +2,16 @@ import OpenSeadragon from "openseadragon";
 // traffic, cats and sky are loaded after the first view (loadAnimations): not in the first script
 import type { Traffic } from "./traffic.ts";
 import type { Cats } from "./cats.ts";
-import type { Planes, Parrots, Airport } from "./sky.ts";
-import { CAMERA, llhToPixel, useRegion, ecefToEnu, llhToEcef } from "../../../pipeline/src/camera.ts";
+import type { Airport } from "./sky.ts";
+import { CAMERA, llhToPixel, useRegion } from "../../../pipeline/src/camera.ts";
 import { CITIES } from "../../../pipeline/src/places.ts";
-import { LANDMARKS } from "../../../pipeline/src/landmarks.ts";
+import { LANDMARKS, landmarkPixel } from "../../../pipeline/src/landmarks.ts";
+import { ActivityMask, activeRoads, type ActivityCoverage } from "./activity.ts";
 declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by astro.config.mjs
 
 interface World {
+  activity?: ActivityCoverage;
+  landmarks?: Record<string, [number, number]>;
   tile_size: number;
   native_zoom: number;
   min_zoom: number;
@@ -53,6 +56,7 @@ const legacy = modern ? null : json<Record<string, Index>>("tiles.json");
 /** a layer's tile index; the photo layer's only when it is first shown */
 const layerIndex = (layer: "map" | "photo") => (legacy ? legacy.then((all) => all[layer] ?? {}) : json<Index>(files[`tiles-${layer}`]!));
 const [borders, mapIndex] = await Promise.all([json<Border[]>(files.borders ?? "borders.json"), layerIndex("map")]);
+const activity = new ActivityMask(world.activity);
 const [ox, oy] = world.origin;
 const TS = world.tile_size, NZ = world.native_zoom;
 
@@ -124,34 +128,22 @@ const globalToViewport = (x: number, y: number) => base().imageToViewportCoordin
 // ---- overlay: borders, labels, traffic ------------------------------------------------------
 let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
-let traffic: Traffic | null = null, cats: Cats | null = null, parrots: Parrots | null = null, planes: Planes | null = null;
+let traffic: Traffic | null = null, cats: Cats | null = null;
 // the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
 let animationsRequested = false;
 function loadAnimations() {
-  if (animationsRequested) return;
+  if (animationsRequested || !activity.rects.length) return;
   animationsRequested = true;
   Promise.all([
-    import("./traffic.ts"), import("./cats.ts"), import("./sky.ts"), import("./roads.ts"),
+    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"),
     fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
-  ]).then(([{ Traffic }, { Cats }, { Planes, Parrots }, { decodeRoads }, data]) => {
-    const roads = decodeRoads(data);
-    if (world.airport) {
-      // Scenic overflights cross the city centre so planes are visible even when the real
-      // approach corridor (e.g. FCO 16L) never clips the painted centro.
-      const [clat, clon] = city.center;
-      const enu = ecefToEnu(llhToEcef(clat, clon, 50));
-      planes = new Planes(world.enu2px, world.airport, [enu[0], enu[1]]);
-    }
+  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, data]) => {
+    const roads = activeRoads(decodeRoads(data), world.enu2px, activity);
     if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
     if (roads.length) cats = new Cats(roads, world.enu2px);
-    if (roads.length) { // parakeets roam over the streets' extent
-      const a = [Infinity, Infinity, -Infinity, -Infinity];
-      for (const r of roads) for (let i = 0; i < r.s.length; i += 4) {
-        a[0] = Math.min(a[0], r.s[i]); a[1] = Math.min(a[1], r.s[i + 1]); a[2] = Math.max(a[2], r.s[i]); a[3] = Math.max(a[3], r.s[i + 1]);
-      }
-      parrots = new Parrots(world.enu2px, a, 10); // denser flocks over Rome centro
-    }
-    Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: parrots, __planes: planes });
+    // Unbounded scenic flight routes escape the ready area. Keep them inactive until routes
+    // can be certified against the same coverage mask as the road graph.
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: null, __planes: null });
   });
 }
 setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
@@ -205,8 +197,9 @@ function drawLandmarks(dpr: number, pxPerArt: number) {
   const placed: Array<[number, number, number, number]> = [];
   for (const lm of list) {
     if (pxPerArt < (lm.minPx ?? 0.08)) continue;
-    // Pin at ground / plinth height — h=55 floated labels ~150 art-px off the footprint
-    const [gx, gy] = llhToPixel(lm.lat, lm.lon, lm.pinH ?? 12);
+    // Exported ground anchor is shared with the paint prompt.
+    const [gx, gy] = world.landmarks?.[lm.name] ?? landmarkPixel(lm);
+    if (world.activity && !activity.containsRect(gx, gy)) continue;
     const [sx, sy] = toScreen(gx, gy);
     const size = Math.max(11, Math.min(15, 12 * dpr)) ;
     ctx.font = `600 ${size}px ui-sans-serif, system-ui, sans-serif`;
@@ -247,6 +240,10 @@ function frame(t: number) {
   // zoomed out too far to see them (their draw() thresholds), cars and cats pause instead of
   // simulating thousands of invisible movers every frame
   const px = k / dpr;
+  ctx.save();
+  ctx.beginPath();
+  for (const [x0,y0,x1,y1] of activity.rects) ctx.rect(x0*k+tx,y0*k+ty,(x1-x0)*k,(y1-y0)*k);
+  ctx.clip(); // final guard for antialiasing / full silhouettes at tile boundaries
   if (traffic && showTraffic && px >= 0.28) {
     traffic.step(dt);
     traffic.draw(ctx, toScreen, px, [0, 0, w, hgt]);
@@ -255,10 +252,7 @@ function frame(t: number) {
     cats.step(dt);
     cats.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
-  if (showTraffic) { // sky above everything: parakeets, then the airliner
-    if (parrots) { parrots.step(dt); parrots.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]); }
-    if (planes) { planes.step(dt); planes.draw(ctx, toScreen, k / dpr, [0, 0, w, hgt]); }
-  }
+  ctx.restore();
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview
   if (px >= 0.06) drawLandmarks(dpr, px); // monumenti principali when zoomed in enough
   lastT = t;

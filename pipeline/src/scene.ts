@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { CAMERA, ecefToEnu, enuToPixel, llhToEcef } from "./camera.ts";
+import { osmSolid, hasCompleteParts, type BuildingDetail, type SceneBuilding } from "./building-shape.ts";
 import { SEA_H } from "./heights.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
 
@@ -49,7 +50,7 @@ function simplify(r: P2[], tol: number): P2[] {
   return r.filter((_, i) => keep[i]);
 }
 
-function ringFromLonLat(coords: number[][]): P2[] | null {
+function ringFromLonLat(coords: number[][], minArea = 25): P2[] | null {
   let r: P2[] = coords.map(([lon, lat]) => { const p = toEnu(lon, lat); return [p[0], p[1]] as P2; });
   if (r.length > 1 && r[0][0] === r[r.length - 1][0] && r[0][1] === r[r.length - 1][1]) r = r.slice(0, -1);
   // closed ring: split at the vertex farthest from r[0] so both halves have a real chord
@@ -59,7 +60,7 @@ function ringFromLonLat(coords: number[][]): P2[] | null {
   if (r.length < 3) return null;
   if (area2(r) < 0) r.reverse();
   // Drop stub footprints (< ~25 m²) — they paint as lone 2-window shards in plazas
-  return Math.abs(area2(r)) >= 25 ? r : null;
+  return Math.abs(area2(r)) >= minArea ? r : null;
 }
 
 function inside([x, y]: P2, poly: P2[]) {
@@ -117,7 +118,7 @@ function landmarkHeight(t: Record<string, string>): number | null {
 }
 
 function osmKind(t: Record<string, string>): string {
-  if (t.amenity || t.tourism === "attraction" || t.historic ||
+  if (t.amenity || t.historic ||
     ["public", "cathedral", "church", "basilica", "temple", "chapel", "mosque", "synagogue",
       "amphitheatre", "ruins", "castle", "palace", "civic", "government", "university", "school",
       "hospital", "train_station", "stadium", "triumphal_arch", "obelisk"].includes(t.building))
@@ -142,14 +143,14 @@ function sameLL(a: number[], b: number[], eps = 1e-10) {
  * Every outer ring with a real footprint (OSM multipolygons often put stubs first).
  * Open outer ways (Fontana di Trevi, etc.) are chained into closed rings by endpoint.
  */
-function outerRings(el: any): number[][][] {
-  if (el.type === "way" && el.geometry?.length >= 4
+function outerRings(el: any, role = "outer"): number[][][] {
+  if (role === "outer" && el.type === "way" && el.geometry?.length >= 4
     && el.geometry[0].lat === el.geometry.at(-1).lat && el.geometry[0].lon === el.geometry.at(-1).lon)
     return [el.geometry.map((q: any) => [q.lon, q.lat])];
   if (el.type !== "relation" || !el.members) return [];
   const segs: number[][][] = [];
   for (const m of el.members) {
-    if (m.role !== "outer" || !m.geometry || m.geometry.length < 2) continue;
+    if (m.role !== role || !m.geometry || m.geometry.length < 2) continue;
     segs.push(m.geometry.map((q: any) => [q.lon, q.lat]));
   }
   const out: number[][][] = [];
@@ -191,7 +192,7 @@ const out = join(DERIVED, name, "scene");
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
-type Building = { ring: P2[]; h: number; s: number; g: number | null; keepInPlaza?: boolean };
+type Building = { ring: P2[]; h: number; s: number; g: number | null; keepInPlaza?: boolean; detail?: BuildingDetail };
 const buildings: Building[] = [];
 const tlvCover: P2[][] = [];
 
@@ -228,14 +229,28 @@ const covered = (pt: P2) => {
   return false;
 };
 const osm = readJson(join(raw, "osm.json"));
+if (existsSync(join(raw,"building-parts.json"))) {
+  const combined = new Map(osm.elements.map((el:any)=>[`${el.type}/${el.id}`,el]));
+  for (const el of readJson(join(raw,"building-parts.json")).elements) combined.set(`${el.type}/${el.id}`,el);
+  osm.elements=[...combined.values()];
+}
+const partElements = osm.elements.filter((el:any)=>el.tags?.["building:part"] && el.tags["building:part"] !== "no");
+const coloredParents = osm.elements.filter((el:any)=>el.tags?.building && (el.tags["building:colour"] || el.tags["roof:colour"]))
+  .flatMap((el:any)=>outerRings(el).map(coords=>({ring:ringFromLonLat(coords),tags:el.tags}))).filter((p:any)=>p.ring);
+const partRings = partElements.flatMap((el:any)=>outerRings(el).map(coords=>ringFromLonLat(coords,0.1)).filter(Boolean)) as P2[][];
+// A relation owns its member outlines: drawing both fills courtyards and doubles landmark masses.
+const memberWays = new Set<number>(osm.elements.filter((el:any)=>el.type === "relation" && osmSolid(el.tags??{}))
+  .flatMap((el:any)=>(el.members??[]).filter((m:any)=>m.type === "way" && ["outer","inner"].includes(m.role)).map((m:any)=>m.ref)));
 let osmCount = 0;
 const trees: Array<[number, number, number, number]> = [];
 for (const el of osm.elements) {
   const t = el.tags ?? {};
   if (el.type === "node" && t.natural === "tree") { const p = toEnu(el.lon, el.lat); trees.push([p[0], p[1], 3, 6]); continue; }
-  // buildings + named fountains/monuments that OSM maps without building=* (e.g. Fontana di Trevi)
+  if (!osmSolid(t) || (el.type === "way" && memberWays.has(el.id))) continue;
+  const isPart = !!t["building:part"] && t["building:part"] !== "no";
+  // buildings + mapped fountain/monument footprints (never an entire tourism site)
   const isFountain = t.amenity === "fountain" || t.fountain === "yes";
-  const isMonument = !t.building && !t.highway && (t.historic === "monument" || t.historic === "memorial" || t.tourism === "attraction")
+  const isMonument = !t.building && !t.highway && (t.historic === "monument" || t.historic === "memorial")
     && (t.name || t["name:en"]);
   if (t.building === "roof" || t.location === "underground") continue;
   const levels = parseFloat(t["building:levels"]);
@@ -245,14 +260,14 @@ for (const el of osm.elements) {
   // historic=archaeological_site + building=amphitheatre; dropping it left an empty park).
   const ruinLike = t.building === "ruins" || t.historic === "ruins" || t.historic === "archaeological_site";
   if (ruinLike && !lh && t.building !== "amphitheatre" && !isMonument) continue;
-  if (!t.building && !isFountain && !isMonument) continue;
+  if (!t.building && !isPart && !isFountain && !isMonument) continue;
   const rings = outerRings(el);
   if (!rings.length) continue;
   // Materialise rings first; drop outers whose centroid sits inside a larger outer
   // (OSM Colosseum / Vittoriano put arena voids and stub fragments as extra outers).
   const solid: P2[][] = [];
   for (const coords of rings) {
-    const ring = ringFromLonLat(coords);
+    const ring = ringFromLonLat(coords, isPart ? 0.1 : 25);
     if (!ring) continue;
     solid.push(ring);
   }
@@ -269,6 +284,8 @@ for (const el of osm.elements) {
   for (const ring of kept) {
     const c: P2 = [ring.reduce((a, p) => a + p[0], 0) / ring.length, ring.reduce((a, p) => a + p[1], 0) / ring.length];
     if (covered(c)) continue;
+    if (!isPart && hasCompleteParts(ring,partRings,inside)) continue;
+    const holes = outerRings(el,"inner").map(coords=>ringFromLonLat(coords,0.1)).filter((r):r is P2[]=>!!r && inside(r[0],ring));
     // OSM rings already encode geographic orientation: never rotate an entire footprint
     // to expose a facade to the camera. Real tagged heights precede fallback massing.
     let h = parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0) || lh;
@@ -279,7 +296,15 @@ for (const el of osm.elements) {
     }
     // secondary outers of a multipolygon (arcade wings, annexes) stay a bit lower than the main mass
     if (lh && !isFountain && !t.height && !levels && part > 0) h = Math.max(8, h * 0.55);
-    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh), g: null, keepInPlaza: !!lh || !!t.name || !!t["name:en"] });
+    const parent = isPart ? coloredParents.find((p:any)=>inside(c,p.ring))?.tags : undefined;
+    const detail: BuildingDetail = {holes, part:isPart, minHeight:parseFloat(t.min_height)||0,
+      roofShape:t["roof:shape"],
+      // Pantheon: surveyed 43.3 m hemispherical interior; the OSM roof:height=40 describes
+      // the enclosing drum + dome, not a 40 m roof on top of a 4 m wall.
+      roofHeight:el.type === "relation" && el.id === 3373289 ? 21.65 : parseFloat(t["roof:height"])||0,
+      roofDirection: t["roof:direction"] ? Number(t["roof:direction"]) : undefined,
+      roofAcross:t["roof:orientation"] === "across",wallColor:t["building:colour"] ?? parent?.["building:colour"],roofColor:t["roof:colour"] ?? parent?.["roof:colour"]};
+    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh || isPart), g: null, detail, keepInPlaza: isPart || !!lh || !!t.name || !!t["name:en"] });
     osmCount++;
     part++;
   }
@@ -369,7 +394,7 @@ for (const f of can.features) {
 console.log(`  tree crowns: ${trees.length}`);
 
 // 4. Bin objects by the render tiles they can appear on (base … top, + margin).
-const bins = new Map<string, { b: Array<[P2[], number, number, number | null]>; t: Array<[number, number, number, number]> }>();
+const bins = new Map<string, { b: SceneBuilding[]; t: Array<[number, number, number, number]> }>();
 const add = (minx: number, miny: number, maxx: number, maxy: number, fn: (bin: any) => void) => {
   for (let ty = Math.floor((miny - 8) / T); ty <= Math.floor((maxy + 8) / T); ty++)
     for (let tx = Math.floor((minx - 8) / T); tx <= Math.floor((maxx + 8) / T); tx++) {
@@ -383,7 +408,7 @@ for (const b of buildings) {
   const pts = b.ring.flatMap(([x, y]) => [enuToPixel([x, y, GROUND_GUESS - 15]), enuToPixel([x, y, GROUND_GUESS + 25 + b.h])]);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   const ring = b.ring.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100] as P2);
-  add(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), (bin) => bin.b.push([ring, Math.round(b.h * 10) / 10, b.s, b.g && Math.round(b.g * 10) / 10]));
+  add(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), (bin) => bin.b.push([ring, Math.round(b.h * 10) / 10, b.s, b.g && Math.round(b.g * 10) / 10, b.detail]));
 }
 for (const t of trees) {
   const a = enuToPixel([t[0], t[1], GROUND_GUESS - 15]), c = enuToPixel([t[0], t[1], GROUND_GUESS + 25 + t[3] + t[2]]);

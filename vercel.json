@@ -6,7 +6,8 @@
   "git": {
     "deploymentEnabled": {
       "fix/roma-quality-batch": false,
-      "main": false
+      "main": false,
+      "fix/roma-map-integrity": false
     }
   }
 }

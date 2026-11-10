@@ -16,7 +16,7 @@ function windowCount(tiles: number[][]) {
 useRegion("roma-centro");
 const current = new Set(["roma-core", "roma-inner"].flatMap(a => areaTiles(AREAS[a].bbox).map(key)));
 console.log(`Current planned render union: ${current.size} tiles (not a count of files on disk).`);
-console.table(Object.entries(AREA_PROPOSALS).map(([name, area]) => {
+console.table(Object.entries({"roma-nord":AREAS["roma-nord"],...AREA_PROPOSALS}).map(([name, area]) => {
   const tiles = areaTiles(area.bbox), added = tiles.filter(t => !current.has(key(t)));
   return { name, bbox: area.bbox.join(","), renderTiles: tiles.length, newTiles: added.length,
     paintWindows: windowCount(tiles), newTileWindows: windowCount(added) };
