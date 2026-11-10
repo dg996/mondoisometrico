@@ -20,7 +20,7 @@ export const AREAS: Record<string, Area> = {
   },
   /**
    * Anello urbano intorno al centro: Prati/Trastevere → San Giovanni, Parioli → Ostiense.
-   * Complements roma-core (export merges tiles; overlapping centres keep the painted core).
+   * Complements roma-core (export merges tiles; the LAST area wins within each layer).
    */
   "roma-inner": {
     title: "Roma · Città",
@@ -32,6 +32,23 @@ export const AREAS: Record<string, Area> = {
     title: "Pantheon · Piazza Navona",
     region: "roma-centro",
     bbox: [41.8955, 12.4700, 41.9020, 12.4815],
+  },
+};
+
+/** Proposal only: NOT accepted by openArea or exported until a separate expansion batch is approved.
+ * Preserve the region origin/camera. Finish the current playable rectangle before adding these. */
+export const AREA_PROPOSALS: Record<string, Area> = {
+  "roma-nord": {
+    title: "Flaminio · Ponte Milvio", region: "roma-centro",
+    bbox: [41.925, 12.450, 41.950, 12.510],
+  },
+  "roma-sud": {
+    title: "Garbatella · San Paolo", region: "roma-centro",
+    bbox: [41.840, 12.455, 41.870, 12.510],
+  },
+  "roma-est": {
+    title: "Pigneto · Torpignattara · Centocelle", region: "roma-centro",
+    bbox: [41.865, 12.530, 41.905, 12.580],
   },
 };
 
