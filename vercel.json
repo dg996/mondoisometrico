@@ -4,10 +4,6 @@
   "installCommand": "npm install",
   "framework": null,
   "git": {
-    "deploymentEnabled": {
-      "fix/roma-quality-batch": false,
-      "main": false,
-      "fix/roma-map-integrity": false
-    }
+    "deploymentEnabled": true
   }
 }

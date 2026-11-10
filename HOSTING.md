@@ -38,8 +38,9 @@ seguito da **un solo** `npx vercel --prod` dalla root.
 
 `world.json` viene inviato per ultimo e solo dopo il controllo dei riferimenti su R2.
 Non modificare il manifest a mano. Nessun deploy a metà batch.
-I deploy automatici Git sono disabilitati per `main` e per il branch della PR del batch,
-così push e merge non anticipano la pubblicazione manuale.
+I deploy automatici Git sono abilitati (`git.deploymentEnabled: true` in `vercel.json`):
+ogni push su un branch collegato crea un deployment Vercel. Le tile restano su R2 e
+richiedono comunque `npm run publish` separato.
 
 Il Worker Cloudflare resta un backup: `npm run deploy` pubblica quel Worker,
 **non** il sito Vercel, e non va usato nel rilascio Roma descritto qui.
