@@ -1,32 +1,30 @@
 # Mondo Isometrico
 
-Isometric map of **Rome** from open data. Fork of
-[Isometric World](https://github.com/krasun/isometricworld) by Dmytro Krasun.
+Mappa isometrica di **Roma** costruita da open data.
 
-**Site (planned):** [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
+**Sito:** [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
 
-## What’s in this fork
+## Cosa c’è
 
-- Region `roma-centro` (origin: Piazza Venezia, heading 45°)
-- City `/roma` (default) — Pantheon / centro storico
-- Test area `pantheon` (~800 m: Pantheon → Piazza Navona) — paint this first
-- Branding, R2 bucket `mondoisometricotiles`, Worker `mondoisometrico`
-- OSM + Copernicus only for now (Tel Aviv GIS skipped); see [ATTRIBUTION.md](ATTRIBUTION.md)
+- Regione `roma-centro` (origine: Piazza Venezia, heading 45°)
+- Città `/roma` (default) — Pantheon / centro storico
+- Area di test `pantheon` (~800 m: Pantheon → Piazza Navona)
+- Tile su Cloudflare R2 (`mondoisometricotiles`), sito su Vercel + Worker Cloudflare
 
-## Quick start
+## Avvio rapido
 
-Needs Node 24+, Chromium/Chrome (`CHROME_PATH`), and for publish/deploy a Cloudflare account + wrangler.
+Serve Node 24+, Chromium/Chrome (`CHROME_PATH`), e per publish/deploy un account Cloudflare + wrangler.
 
 ```sh
-cp .env.example .env   # fill TILES_ORIGIN, CLOUDFLARE_ACCOUNT_ID, SITE_DOMAIN
+cp .env.example .env   # TILES_ORIGIN, CLOUDFLARE_ACCOUNT_ID, SITE_DOMAIN
 npm install
 npm run dev            # http://localhost:<port>/roma
 ```
 
-Hosting and GoDaddy DNS: **[HOSTING.md](HOSTING.md)**.  
-Adding cities / pipeline rules: **[AGENTS.md](AGENTS.md)**.
+Hosting e DNS: **[HOSTING.md](HOSTING.md)**.  
+Regole pipeline / agenti: **[AGENTS.md](AGENTS.md)**.
 
-## Pipeline (test patch)
+## Pipeline (patch di test)
 
 ```sh
 npm -w pipeline run boundaries -- roma-centro
@@ -34,13 +32,17 @@ npm run fetch -- pantheon
 npm run ground -- pantheon
 npm run scene -- pantheon
 npm run render -- pantheon -j 2
-npm run paint -- pantheon --center 41.8986,12.4769   # Codex CLI; review before expanding
+npm run paint -- pantheon --center 41.8986,12.4769   # Codex CLI; rivedere prima di espandere
 npm run export -- pantheon
-npm run publish -- roma-centro   # only with go-ahead
+npm run publish -- roma-centro   # solo con conferma esplicita
 npm run deploy
 ```
 
-## Licence
+## Licenza
 
-Code: [MIT](LICENSE) (upstream © Dmytro Krasun; this fork © Domenico Gagliardi).  
-Map imagery: CC BY 4.0 + data credits in [ATTRIBUTION.md](ATTRIBUTION.md).
+Codice: [MIT](LICENSE).  
+Immagini della mappa: CC BY 4.0 + crediti dati in [ATTRIBUTION.md](ATTRIBUTION.md).
+
+---
+
+Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun.

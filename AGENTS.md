@@ -1,9 +1,8 @@
-# Mondo Isometrico: guide for agents
+# Mondo Isometrico: guida per gli agenti
 
-Fork of Isometric World focused on Rome
+Mappa isometrica di Roma da open data
 ([mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)).
-Hand-painted isometric city maps from open data. Read `README.md`, `HOSTING.md`, and
-`ATTRIBUTION.md` first. Everything is TypeScript; the site is Astro + OpenSeadragon.
+Leggere prima `README.md`, `HOSTING.md` e `ATTRIBUTION.md`. Tutto è TypeScript; il sito è Astro + OpenSeadragon.
 
 ## Hard rules
 

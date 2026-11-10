@@ -1,10 +1,13 @@
 # Hosting · Mondo Isometrico
 
-Live site: **https://mondoisometrico.domenicogagliardi.com**  
-Tiles: R2 bucket `mondoisometricotiles` (public origin in `TILES_ORIGIN`)
+**Perché Cloudflare + Vercel:** le migliaia di tile deep-zoom stanno su **R2** (Cloudflare);
+il sito statico Astro è su **Vercel** al dominio custom. `npm run publish` carica le tile su R2.
 
-Fork of [Isometric World](https://github.com/krasun/isometricworld); hosting is Cloudflare Workers + R2
-(not Vercel). Nameservers for `domenicogagliardi.com` stay on GoDaddy — only a DNS record is needed.
+**Sito:** https://mondoisometrico.domenicogagliardi.com  
+**Worker (backup):** https://mondoisometrico.mondoisometrico.workers.dev  
+Tile: bucket R2 `mondoisometricotiles` (origine pubblica in `TILES_ORIGIN`)
+
+Account ID: `b82ec99b9bba59f1cec4aaa790a9c635`
 
 ## 1. Cloudflare account
 
