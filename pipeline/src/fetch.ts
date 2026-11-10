@@ -114,6 +114,8 @@ if (!existsSync(join(dir, "osm.json"))) {
 (
   way["building"]${b};
   relation["building"]${b};
+  way["building:part"]["building:part"!="no"]${b};
+  relation["building:part"]["building:part"!="no"]${b};
   node["natural"="tree"]${b};
   nwr["amenity"="fountain"]${b};
   nwr["historic"~"^(monument|memorial|ruins|archaeological_site|castle|citywalls)$"]${b};
@@ -122,6 +124,13 @@ if (!existsSync(join(dir, "osm.json"))) {
 out body geom;`);
   writeFileSync(join(dir, "osm.json"), JSON.stringify(data));
   console.log(`  osm: ${data.elements.length} elements`);
+}
+// Backfill detailed geometry even when an older osm.json is already cached; preserve that cache.
+if (!existsSync(join(dir,"building-parts.json"))) {
+  const [s,w,n,e]=area.bbox, b=`(${s},${w},${n},${e})`;
+  const data=await overpass(`[out:json][timeout:300];(way["building:part"]["building:part"!="no"]${b};relation["building:part"]["building:part"!="no"]${b};);out body geom;`);
+  writeFileSync(join(dir,"building-parts.json"),JSON.stringify(data));
+  console.log(`  building parts: ${data.elements.length} elements`);
 }
 if (!existsSync(join(dir, "roads.json"))) {
   const [s, w, n, e] = area.bbox;

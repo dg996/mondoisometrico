@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 
 export const PIPELINE = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const ROOT = join(PIPELINE, "..");
-export const DATA = join(ROOT, "data");
+/** Optional isolated data root for regression fixtures; production defaults to the Mac's data/. */
+export const DATA = process.env.MONDO_DATA_DIR || join(ROOT, "data");
 export const RAW = join(DATA, "raw");
 export const DERIVED = join(DATA, "derived");
 /** Built map data waiting to be published (served by the dev server over production); emptied by publish. */

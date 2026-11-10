@@ -7,6 +7,11 @@ import * as THREE from "three";
 import { CAMERA, axes, ecefToEnu, llhToEcef, tileCamera, useRegion } from "../src/camera.ts";
 import { drawGround, type Feature } from "./ground.ts";
 
+import { bridgeProfile } from "../src/bridge-profile.ts";
+import { groundAt, inWater } from "../src/road-safety.ts";
+import { roofRise, type SceneBuilding } from "../src/building-shape.ts";
+import { bridgeMesh } from "./bridges.ts";
+
 const params = new URLSearchParams(location.search);
 useRegion(params.get("region") ?? "roma-centro"); // before any projection below
 const SS = Number(params.get("ss") ?? 2); // supersampling
@@ -53,6 +58,13 @@ function ground(x: number, y: number): number {
   return (terrain[i] * (1 - ax) + terrain[i + 1] * ax) * (1 - ay) + (terrain[i + meta.nx] * (1 - ax) + terrain[i + meta.nx + 1] * ax) * ay;
 }
 
+// Build bridges once from full OSM ways; their altitude matches exported traffic samples.
+const waterPolygons = features.filter(f=>["water","sea","pool"].includes(f.k)&&f.r).map(f=>f.r!);
+for (const f of features.filter(f=>f.bridge && f.l && f.w)) {
+  const profile = bridgeProfile(f.l!, (x,y)=>groundAt(meta,terrain,x,y), (x,y)=>inWater(x,y,waterPolygons));
+  if(profile) scene.add(bridgeMesh(profile,f.w!,["path","plaza","cycle"].includes(f.k)));
+}
+
 const groundTexture = new THREE.CanvasTexture(document.createElement("canvas"));
 groundTexture.colorSpace = THREE.SRGBColorSpace;
 groundTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -79,7 +91,7 @@ function buildGround(tx: number, ty: number, data?: TileObjects) {
   const cv = groundTexture.image as HTMLCanvasElement;
   cv.width = Math.ceil((x1 - x0) / GROUND_MPT);
   cv.height = Math.ceil((y1 - y0) / GROUND_MPT);
-  const visible = features.filter((_, i) => fbox[i][0] < x1 && fbox[i][2] > x0 && fbox[i][1] < y1 && fbox[i][3] > y0);
+  const visible = features.filter((f, i) => !f.bridge && fbox[i][0] < x1 && fbox[i][2] > x0 && fbox[i][1] < y1 && fbox[i][3] > y0);
   drawGround(cv.getContext("2d")!, visible, [x0, y0, x1, y1], GROUND_MPT, data ?? { b: [], t: [] }, ground);
   groundTexture.needsUpdate = true;
   // terrain mesh: 5 m grid draped on the terrain, UVs into the canvas
@@ -134,7 +146,7 @@ heightTarget.texture.generateMipmaps = false;
 
 type P2 = [number, number];
 export interface TileObjects {
-  b: Array<[P2[], number, number, number | null]>; // ring, height, style, ground hint (ellipsoid)
+  b: SceneBuilding[]; // ring, height, style, ground hint (ellipsoid)
   t: Array<[number, number, number, number]>;      // x, y, radius, crown height
 }
 
@@ -272,29 +284,52 @@ function buildObjects(data: TileObjects) {
     }
   };
   const rnd = (seed: number) => () => ((seed = Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x9e3779b9 | 0) >>> 0) / 2 ** 32;
-  data.b.forEach(([ring, h, style]) => {
+  data.b.forEach(([ring, h, style, _groundHint, detail = {}]) => {
     // sit on the highest ground under the footprint; walls reach 1 m below the lowest so slopes never show a gap
     const gs = ring.map(([x, y]) => ground(x, y));
-    const top = Math.max(...gs) + h, g = Math.min(...gs) - 1;
-    const [wall, roof] = PALETTE[style] ?? PALETTE[0];
+    const base = Math.max(...gs), roofHeight = Math.min(detail.roofHeight ?? 0,h-(detail.minHeight??0));
+    const top = base + h - Math.max(0,roofHeight), g = detail.minHeight ? base+detail.minHeight : Math.min(...gs)-1;
+    const palette = PALETTE[style] ?? PALETTE[0];
+    const color = (value: string|undefined, fallback:number[]) => value && /^#[0-9a-f]{6}$/i.test(value)
+      ? [1,3,5].map(i=>parseInt(value.slice(i,i+2),16)/255) : fallback;
+    const wall=color(detail.wallColor,palette[0]), roof=color(detail.roofColor,palette[1]);
     const isTower = style;
+    const surface = (p:P2)=>top+(roofHeight>0 ? roofRise(...p,ring,detail.roofShape??"flat",roofHeight,detail.roofDirection,detail.roofAcross) : 0);
+    const holes = (detail.holes??[]).map(r=>r.slice().reverse());
+    for (const boundary of [ring,...holes]) {
+    const outline = roofHeight>0 ? boundary.flatMap((a,i)=>{
+      const b=boundary[(i+1)%boundary.length],n=Math.max(1,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/2));
+      return Array.from({length:n},(_,j)=>[a[0]+(b[0]-a[0])*j/n,a[1]+(b[1]-a[1])*j/n] as P2);
+    }) : boundary;
     let along = 0;
-    for (let k = 0; k < ring.length; k++) {
-      const [ax, ay] = ring[k], [bx, by] = ring[(k + 1) % ring.length];
+    for (let k = 0; k < outline.length; k++) {
+      const [ax, ay] = outline[k], [bx, by] = outline[(k + 1) % outline.length];
       const L = Math.hypot(bx - ax, by - ay);
       if (L < 0.05) continue;
       const nx = (by - ay) / L, ny = -(bx - ax) / L; // outward for CCW
-      const quad = [[ax, ay, g, along, -1], [bx, by, g, along + L, -1], [bx, by, top, along + L, top - g - 1], [ax, ay, top, along, top - g - 1]];
+      const za=surface([ax,ay]),zb=surface([bx,by]);
+      const quad = [[ax, ay, g, along, -1], [bx, by, g, along + L, -1], [bx, by, zb, along + L, zb - g - 1], [ax, ay, za, along, za - g - 1]];
       for (const q of [0, 1, 2, 0, 2, 3]) {
         pos.push(quad[q][0], quad[q][1], quad[q][2]); nor.push(nx, ny, 0); col.push(...wall);
-        fac.push(quad[q][3], quad[q][4]); tow.push(isTower);
+        fac.push(quad[q][3], detail.part ? -1000 : quad[q][4]); tow.push(isTower);
       }
       along += L;
     }
-    const tris = THREE.ShapeUtils.triangulateShape(ring.map(([x, y]) => new THREE.Vector2(x, y)), []);
-    for (const t of tris) for (const v of t) {
-      pos.push(ring[v][0], ring[v][1], top); nor.push(0, 0, 1); col.push(...roof); fac.push(0, -1000); tow.push(0);
     }
+    const vec = (r:P2[])=>r.map(([x,y])=>new THREE.Vector2(x,y));
+    const tris = THREE.ShapeUtils.triangulateShape(vec(ring), holes.map(vec));
+    const vertices = [ring,...holes].flat();
+    const triangle = (a:P2,b:P2,c:P2,depth:number) => {
+      if(roofHeight>0 && depth<4) {
+        const mid=(p:P2,q:P2):P2=>[(p[0]+q[0])/2,(p[1]+q[1])/2];
+        const ab=mid(a,b),bc=mid(b,c),ca=mid(c,a);
+        triangle(a,ab,ca,depth+1);triangle(ab,b,bc,depth+1);triangle(ca,bc,c,depth+1);triangle(ab,bc,ca,depth+1);return;
+      }
+      const vs=[a,b,c].map(p=>new THREE.Vector3(p[0],p[1],surface(p)));
+      const normal=new THREE.Vector3().subVectors(vs[1],vs[0]).cross(new THREE.Vector3().subVectors(vs[2],vs[0])).normalize();
+      for(const v of vs) {pos.push(v.x,v.y,v.z);nor.push(normal.x,normal.y,normal.z);col.push(...roof);fac.push(0,-1000);tow.push(0);}
+    };
+    for(const t of tris) triangle(vertices[t[0]],vertices[t[1]],vertices[t[2]],0);
     // rooftop clutter on flat residential roofs: solar water heaters (panel + tank), AC units
     if (style !== 2 && style !== 3 && style !== 4 && h > 6) {
       const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
@@ -304,7 +339,7 @@ function buildObjects(data: TileObjects) {
       const n = Math.min(10, Math.floor(area / 70));
       for (let k = 0, tries = 0; k < n && tries < n * 6; tries++) {
         const px = x0 + 1.5 + r() * (x1 - x0 - 3), py = y0 + 1.5 + r() * (y1 - y0 - 3);
-        if (!pointInRing(px, py, ring)) continue;
+        if (!pointInRing(px, py, ring) || holes.some(r=>pointInRing(px,py,r))) continue;
         k++;
         const kind = r();
         if (kind < 0.55) {        // solar water heater: dark panel + white tank
