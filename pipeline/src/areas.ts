@@ -27,6 +27,11 @@ export const AREAS: Record<string, Area> = {
     region: "roma-centro",
     bbox: [41.860, 12.420, 41.935, 12.545],
   },
+  /** Approved expansion; becomes playable only after render + paint + coverage QA. */
+  "roma-nord": {
+    title: "Flaminio · Ponte Milvio", region: "roma-centro",
+    bbox: [41.925, 12.450, 41.950, 12.510],
+  },
   /** Small pilot patch (kept for quick tests). */
   pantheon: {
     title: "Pantheon · Piazza Navona",
@@ -38,10 +43,6 @@ export const AREAS: Record<string, Area> = {
 /** Proposal only: NOT accepted by openArea or exported until a separate expansion batch is approved.
  * Preserve the region origin/camera. Finish the current playable rectangle before adding these. */
 export const AREA_PROPOSALS: Record<string, Area> = {
-  "roma-nord": {
-    title: "Flaminio · Ponte Milvio", region: "roma-centro",
-    bbox: [41.925, 12.450, 41.950, 12.510],
-  },
   "roma-sud": {
     title: "Garbatella · San Paolo", region: "roma-centro",
     bbox: [41.840, 12.455, 41.870, 12.510],
