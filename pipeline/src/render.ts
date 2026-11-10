@@ -35,7 +35,7 @@ const area = openArea(areaName);
 
 export const ATTRIBUTIONS = [
   "© OpenStreetMap contributors (ODbL)",
-  "Tel Aviv-Yafo Municipality open data",
+  "OpenStreetMap contributors",
   "Copernicus DEM GLO-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018, provided under COPERNICUS by the European Union and ESA",
 ];
 

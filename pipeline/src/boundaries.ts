@@ -1,7 +1,7 @@
 /**
  * Fetch a region's municipal boundaries (OSM admin_level=8) from Overpass.
  *
- *   npm -w pipeline run boundaries -- israel-center      -> data/raw/boundaries/<region>.json
+ *   npm -w pipeline run boundaries -- roma-centro      -> data/raw/boundaries/<region>.json
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ async function overpass(query: string) {
   throw new Error("overpass failed");
 }
 
-const id = process.argv[2] ?? "israel-center", region = REGIONS[id];
+const id = process.argv[2] ?? "roma-centro", region = REGIONS[id];
 if (!region) throw new Error(`unknown region ${id}`);
 const names = region.municipalities.map((c) => c.replace(/[-]/g, "\\-")).join("|");
 const data = await overpass(`[out:json][timeout:240];

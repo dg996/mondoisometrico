@@ -1,5 +1,5 @@
 /**
- * Regions and cities of Isometric World. Pure data, shared by the pipeline and the web viewer.
+ * Regions and cities of Mondo Isometrico. Pure data, shared by the pipeline and the web viewer.
  *
  * A REGION is one flat map: one orthographic camera in a local East-North-Up frame at its origin,
  * one tile pyramid (web/public/regions/<id>/). A flat map is accurate to ~1° of building lean at
@@ -7,6 +7,18 @@
  * Far-apart cities get their own region (joined later by a world overview).
  *
  * A CITY is a named view into a region: /<city-slug> opens the region centred on it.
+ *
+ * Research notes (Rome, 2026):
+ * - Buildings/heights: start with OSM (`building` + `height` / `building:levels`). Planned upgrade:
+ *   Regione Lazio DBT 2014 (CC BY 4.0) and/or Roma Capitale GeoRoma WFS
+ *   (https://geoportale.comune.roma.it/geoserver/ows) — cite when wired in fetch.ts.
+ * - Trees: OSM natural=tree / landuse=forest / leisure=park (Mediterranean: stone pine, umbrella pine,
+ *   cypress, plane, olive; TLV tree sheet is a starting palette until a Rome sheet is painted).
+ * - Municipal border: OSM admin_level=8 name "Roma", country name:en "Italy".
+ * - Street grid: centro storico is irregular; heading 45° keeps two façades on roughly N–S / E–W
+ *   blocks around the Pantheon and puts the Tiber toward the left of the frame.
+ * - Airport: Fiumicino (FCO) runway 16L ~163°.
+ * - Terrain: Copernicus GLO-30 (global).
  */
 
 export interface Region {
@@ -33,35 +45,25 @@ export interface City {
 }
 
 export const REGIONS: Record<string, Region> = {
-  "israel-center": {
-    title: "Israel · Center",
-    origin: { lat: 32.0778, lon: 34.774, h: 0 }, // Dizengoff Square
-    headingDeg: 340, // 20° west of north: diagonal to Tel Aviv's grid, sea on the left
-    country: "Israel",
+  "roma-centro": {
+    title: "Roma · Centro",
+    origin: { lat: 41.8955, lon: 12.4823, h: 0 }, // Piazza Venezia
+    headingDeg: 45, // NE: diagonal to centro blocks, Tiber toward the left
+    country: "Italy",
     municipalities: [
-      "תל־אביב–יפו", // maqaf + en dash, as in OSM relation 1382494
-      "רמת גן",
-      "גבעתיים",
-      "בני ברק",
-      "חולון",
-      "בת ים",
-      "הרצליה",
-      "רמת השרון",
-      "פתח תקווה",
-      "קריית אונו",
-      "אור יהודה",
-      "גבעת שמואל",
+      "Roma",
     ],
-    airport: { lat: 32.0055, lon: 34.8854, runwayHeadingDeg: 117 }, // Ben Gurion, runway 12
+    airport: { lat: 41.8003, lon: 12.2389, runwayHeadingDeg: 163 }, // Fiumicino FCO, runway 16L
     credits: [
-      "Map data © OpenStreetMap contributors · Tel Aviv-Yafo Municipality",
+      "Map data © OpenStreetMap contributors",
       "Terrain: Copernicus DEM © DLR, Airbus DS · Painted with AI",
     ],
   },
 };
 
 export const CITIES: Record<string, City> = {
-  "tel-aviv-yafo": { title: "Tel Aviv-Yafo", region: "israel-center", center: [32.0745, 34.7810], widthM: 5200 },
+  // Pantheon / Piazza della Rotonda — opening view of the historic centre
+  roma: { title: "Roma", region: "roma-centro", center: [41.8986, 12.4769], widthM: 2800 },
 };
 
-export const DEFAULT_CITY = "tel-aviv-yafo";
+export const DEFAULT_CITY = "roma";

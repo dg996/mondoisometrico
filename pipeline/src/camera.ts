@@ -19,7 +19,7 @@ export const CAMERA = {
   tile: 1024,
 } as const;
 
-let region = "israel-center";
+let region = "roma-centro";
 /** Full camera of the active region (style + origin + heading), as written to manifests/world.json. */
 export function camera() {
   const r = REGIONS[region];

@@ -1,7 +1,7 @@
 /**
  * Publish a region's exported files to R2 and empty the local cache.
  *
- *   npm run publish -- israel-center [--yes] [--keep]
+ *   npm run publish -- roma-centro [--yes] [--keep]
  *
  * Uploads everything in data/web/regions/<region>/ (only what `npm run export` changed) to the
  * bucket in hosting.ts: tiles first, then previews and the content-hashed data files, world.json last
@@ -22,7 +22,7 @@ import { WEB_CACHE, WEB_STATE } from "./paths.ts";
 import { REGIONS } from "./places.ts";
 
 const args = process.argv.slice(2);
-const region = args.find((a) => !a.startsWith("--")) ?? "israel-center";
+const region = args.find((a) => !a.startsWith("--")) ?? "roma-centro";
 if (!REGIONS[region]) throw new Error(`unknown region ${region}`);
 const dir = join(WEB_CACHE, "regions", region), pending = join(WEB_CACHE, `${region}.state.json`);
 if (!existsSync(dir)) { console.log(`nothing to publish: ${dir} is empty (run npm run export first)`); process.exit(0); }

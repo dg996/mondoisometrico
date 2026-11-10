@@ -549,7 +549,7 @@ let OUT = ""; // data/web/regions/<region>
 
 async function main() {
   const names = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const areas = names.length ? names : ["tlv-core"];
+  const areas = names.length ? names : ["pantheon"];
   const regions = new Set(areas.map((a) => openArea(a).region));
   if (regions.size !== 1) throw new Error(`export one region at a time (got ${[...regions].join(", ")})`);
   OUT = join(WEB_CACHE, "regions", activeRegion());

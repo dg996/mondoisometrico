@@ -4,7 +4,7 @@
  *            opening + blur, which is plenty for flat Gush Dan), sea/lakes flattened from OSM
  *   surface  OSM roads at real widths, pavements, landuse, parks, beach, water, rail
  *
- *   npm -w pipeline run ground -- tlv-core
+ *   npm -w pipeline run ground -- pantheon
  *
  * Output: data/derived/<area>/ground/meta.json     grid origin/step/size (ENU meters)
  *         data/derived/<area>/ground/height.bin    Float32 ENU "up" of the ground per grid node
@@ -20,7 +20,7 @@ import { SEA_H } from "./heights.ts";
 import { ROAD, isOneway, roadWidth } from "./roadspec.ts";
 
 type P2 = [number, number];
-/** Geoid undulation off Tel Aviv: orthometric (MSL) + this = ellipsoid height (= sea level). */
+/** Geoid undulation: orthometric (MSL) + this = ellipsoid height (= sea level). */
 const GEOID = SEA_H;
 const STEP = 10;
 const MARGIN = 0.02;
@@ -32,7 +32,7 @@ const R_EARTH = 6371000;
  */
 export interface Feature { k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
 
-const name = process.argv[2] ?? "tlv-core";
+const name = process.argv[2] ?? "pantheon";
 const area = openArea(name);
 const [S, W, N, E] = area.bbox;
 const bb = [S - MARGIN, W - MARGIN, N + MARGIN, E + MARGIN];

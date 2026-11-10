@@ -1,7 +1,9 @@
-# Isometric World: guide for agents
+# Mondo Isometrico: guide for agents
 
-Hand-painted isometric city maps from open data. Read `README.md` (pipeline, layout) and
-`ATTRIBUTION.md` (sources, licences) first. Everything is TypeScript; the site is Astro + OpenSeadragon.
+Fork of Isometric World focused on Rome
+([mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)).
+Hand-painted isometric city maps from open data. Read `README.md`, `HOSTING.md`, and
+`ATTRIBUTION.md` first. Everything is TypeScript; the site is Astro + OpenSeadragon.
 
 ## Hard rules
 
@@ -32,7 +34,7 @@ Hand-painted isometric city maps from open data. Read `README.md` (pipeline, lay
 - **City** (`CITIES` in `places.ts`): a named view into a region. `/<city-slug>` opens the region centred
   on it. Slugs are lowercase, ASCII, hyphenated (`tel-aviv-yafo`); capitalised links redirect (404 page).
 - **Hosting** (`pipeline/src/hosting.ts`, README "Hosting"): tiles and region data live only on R2
-  (`isometricworldtiles`, `regions/<region>/` under `TILES_ORIGIN` from `.env`), never in git or
+  (`mondoisometricotiles`, `regions/<region>/` under `TILES_ORIGIN` from `.env`), never in git or
   `web/public`. `export` writes changed files to the cache `data/web/regions/<region>/`, `npm run dev` shows
   the cache over production, `publish` uploads and empties the cache.
 - **Area** (`AREAS` in `pipeline/src/areas.ts`): a bbox the pipeline fetches, renders and paints. Belongs

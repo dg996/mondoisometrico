@@ -86,5 +86,5 @@ async function og(slug: string, heading: string, name: string) {
 
 const names = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 // the home page (/) opens the default city: same view, the site name as the heading
-if (!names.length || names.includes("index")) await og(DEFAULT_CITY, "Isometric World", "index");
+if (!names.length || names.includes("index")) await og(DEFAULT_CITY, "Mondo Isometrico", "index");
 for (const slug of names.length ? names.filter((n) => n !== "index") : Object.keys(CITIES)) await og(slug, CITIES[slug]?.title ?? slug, slug);

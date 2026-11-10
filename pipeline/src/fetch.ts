@@ -1,12 +1,11 @@
 /**
  * Fetch the open data an area is built from (no Google: everything is openly licensed).
  *
- *   npm -w pipeline run fetch -- tlv-core
+ *   npm -w pipeline run fetch -- pantheon
  *
- * data/raw/<area>/tlv_buildings.geojson  Tel Aviv-Yafo GIS layer 513: footprints, 2019 surveyed
- *                                        height above ground, base/roof elevation, floors
- * data/raw/<area>/tlv_canopy.geojson     layer 574: 2024 tree canopy polygons
- * data/raw/<area>/osm.json               OSM buildings + trees (outside Tel Aviv-Yafo coverage)
+ * data/raw/<area>/tlv_buildings.geojson  Tel Aviv-Yafo GIS only (empty FeatureCollection elsewhere)
+ * data/raw/<area>/tlv_canopy.geojson     Tel Aviv-Yafo canopy only (empty elsewhere)
+ * data/raw/<area>/osm.json               OSM buildings + trees (primary source for Rome)
  * data/raw/<area>/roads.json             OSM drivable roads (for the traffic animation)
  * data/raw/<area>/ground.json            OSM ground surface: roads/paths, landuse, parks, water,
  *                                        coastline, rail (bbox + margin, drawn onto the terrain)
@@ -17,8 +16,9 @@ import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { RAW } from "./paths.ts";
 
+const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const TLV = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/IView2/MapServer/{layer}/query";
-const UA = { "User-Agent": "isometric-world/0.3 (open-data isometric map)" };
+const UA = { "User-Agent": "mondoisometrico/0.1 (open-data isometric map; fork of isometricworld)" };
 
 async function arcgisCell(layer: number, [s, w, n, e]: [number, number, number, number], fields: string) {
   const feats: any[] = [];
@@ -72,16 +72,25 @@ async function overpass(query: string) {
   throw new Error("overpass failed");
 }
 
-const name = process.argv[2] ?? "tlv-core";
+const name = process.argv[2] ?? "pantheon";
 const area = openArea(name);
 const dir = join(RAW, name);
 mkdirSync(dir, { recursive: true });
 
-if (!existsSync(join(dir, "tlv_buildings.geojson")))
-  writeFileSync(join(dir, "tlv_buildings.geojson"), JSON.stringify(await arcgis(513, area.bbox,
-    "id_binyan,t_sug_mivne,ms_komot,gova_simplex_2019,min_height,max_height,year", "id_binyan")));
-if (!existsSync(join(dir, "tlv_canopy.geojson")))
-  writeFileSync(join(dir, "tlv_canopy.geojson"), JSON.stringify(await arcgis(574, area.bbox, "OBJECTID", "OBJECTID")));
+// Tel Aviv municipal layers only for israel-center areas; Rome uses OSM (+ planned GeoRoma/DBT).
+const useTlvGis = area.region === "israel-center";
+if (!existsSync(join(dir, "tlv_buildings.geojson"))) {
+  writeFileSync(join(dir, "tlv_buildings.geojson"), JSON.stringify(
+    useTlvGis
+      ? await arcgis(513, area.bbox, "id_binyan,t_sug_mivne,ms_komot,gova_simplex_2019,min_height,max_height,year", "id_binyan")
+      : EMPTY_FC,
+  ));
+}
+if (!existsSync(join(dir, "tlv_canopy.geojson"))) {
+  writeFileSync(join(dir, "tlv_canopy.geojson"), JSON.stringify(
+    useTlvGis ? await arcgis(574, area.bbox, "OBJECTID", "OBJECTID") : EMPTY_FC,
+  ));
+}
 if (!existsSync(join(dir, "osm.json"))) {
   const [s, w, n, e] = area.bbox;
   const b = `(${s},${w},${n},${e})`;

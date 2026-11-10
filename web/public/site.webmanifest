@@ -1,7 +1,7 @@
 {
-  "name": "Isometric World",
-  "short_name": "Isometric World",
-  "description": "Hand-painted isometric city maps from open data.",
+  "name": "Mondo Isometrico",
+  "short_name": "Mondo Isometrico",
+  "description": "Mappa isometrica di Roma da open data.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0e0f12",

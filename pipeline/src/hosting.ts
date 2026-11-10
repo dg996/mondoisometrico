@@ -18,7 +18,7 @@ function need(name: string): string {
 
 export const HOSTING = {
   /** R2 bucket (Cloudflare account CLOUDFLARE_ACCOUNT_ID). */
-  bucket: "isometricworldtiles",
+  bucket: "mondoisometricotiles",
   get accountId() { return need("CLOUDFLARE_ACCOUNT_ID"); },
   /** Public origin of the bucket (its custom domain), no trailing slash. */
   get origin() { return need("TILES_ORIGIN").replace(/\/+$/, ""); },

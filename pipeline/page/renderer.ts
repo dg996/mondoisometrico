@@ -8,7 +8,7 @@ import { CAMERA, axes, ecefToEnu, llhToEcef, tileCamera, useRegion } from "../sr
 import { drawGround, type Feature } from "./ground.ts";
 
 const params = new URLSearchParams(location.search);
-useRegion(params.get("region") ?? "israel-center"); // before any projection below
+useRegion(params.get("region") ?? "roma-centro"); // before any projection below
 const SS = Number(params.get("ss") ?? 2); // supersampling
 const SIZE = CAMERA.tile * SS;
 const HEIGHT_SIZE = 256;

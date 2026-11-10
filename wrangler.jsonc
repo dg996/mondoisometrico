@@ -4,7 +4,7 @@
 // Deploy with `npm run deploy` (needs SITE_DOMAIN in .env).
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "isometricworld",
+  "name": "mondoisometrico",
   "compatibility_date": "2026-11-01",
   "main": "./worker/index.ts",
   "assets": {

@@ -17,7 +17,7 @@ const slugs = Object.keys(CITIES);
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="theme-color" content="#0e0f12" />
 		<meta name="color-scheme" content="dark" />
-		<title>Not found · Isometric World</title>
+		<title>Not found · Mondo Isometrico</title>
 		<script is:inline define:vars={{ slugs }}>
 			const want = decodeURIComponent(location.pathname).replace(/^\/+|\/+$/g, "").toLowerCase().replace(/[\s_]+/g, "-");
 			if (slugs.includes(want)) location.replace(`/${want}${location.search}${location.hash}`);

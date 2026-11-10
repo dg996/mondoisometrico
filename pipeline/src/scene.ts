@@ -2,7 +2,7 @@
  * Build the 3D scene for an area from open data, in the camera's ENU frame.
  * Buildings and tree crowns; the ground comes from ground.ts.
  *
- *   npm -w pipeline run scene -- tlv-core
+ *   npm -w pipeline run scene -- pantheon
  *
  * Output: data/derived/<area>/scene/<tx>_<ty>.json — objects visible in each render tile:
  *   b: buildings  [ring (ENU x,y pairs, CCW), height above ground, style, groundHint]
@@ -12,12 +12,13 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { CAMERA, ecefToEnu, enuToPixel, llhToEcef } from "./camera.ts";
+import { SEA_H } from "./heights.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
 
 type P2 = [number, number];
 const T = CAMERA.tile;
-/** Geoid undulation off Tel Aviv: orthometric (MSL) + this = ellipsoid height. */
-const GEOID = 19.1;
+/** Geoid undulation (MSL orthometric + this = ellipsoid height). */
+const GEOID = SEA_H;
 const FLOOR = 3.2;
 
 const toEnu = (lon: number, lat: number, h = 0): [number, number, number] => ecefToEnu(llhToEcef(lat, lon, h));
@@ -86,7 +87,7 @@ function style(height: number, kind: string, id: number, year?: number | null) {
   return hash(id) < 0.25 ? 0 : 1;
 }
 
-const name = process.argv[2] ?? "tlv-core";
+const name = process.argv[2] ?? "pantheon";
 const bbox = openArea(name).bbox;
 const raw = join(RAW, name);
 const out = join(DERIVED, name, "scene");
@@ -97,8 +98,10 @@ type Building = { ring: P2[]; h: number; s: number; g: number | null };
 const buildings: Building[] = [];
 const tlvCover: P2[][] = [];
 
-// 1. Tel Aviv-Yafo municipal buildings: surveyed heights.
-const tlv = readJson(join(raw, "tlv_buildings.geojson"));
+// 1. Tel Aviv-Yafo municipal buildings (empty FeatureCollection for Rome / other cities).
+const tlv = existsSync(join(raw, "tlv_buildings.geojson"))
+  ? readJson(join(raw, "tlv_buildings.geojson"))
+  : { features: [] };
 for (const f of tlv.features) {
   const p = f.properties, g = f.geometry;
   if (!g) continue;
@@ -176,8 +179,10 @@ console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
   console.log(`  dropped ${before - buildings.length} bridges/decks over motorways and rail`);
 }
 
-// 3. Tree crowns from 2024 canopy polygons: one crown per ~6 m cell inside each polygon.
-const can = readJson(join(raw, "tlv_canopy.geojson"));
+// 3. Tree crowns from municipal canopy (TLV) or skip when empty; OSM trees already added above.
+const can = existsSync(join(raw, "tlv_canopy.geojson"))
+  ? readJson(join(raw, "tlv_canopy.geojson"))
+  : { features: [] };
 for (const f of can.features) {
   const g = f.geometry;
   if (!g) continue;
@@ -211,7 +216,7 @@ const add = (minx: number, miny: number, maxx: number, maxy: number, fn: (bin: a
       fn(bins.get(k)!);
     }
 };
-const GROUND_GUESS = 45;
+const GROUND_GUESS = 70; // Rome centro ~20–50 m MSL + geoid; used only for tile binning
 for (const b of buildings) {
   const pts = b.ring.flatMap(([x, y]) => [enuToPixel([x, y, GROUND_GUESS - 15]), enuToPixel([x, y, GROUND_GUESS + 25 + b.h])]);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);

@@ -89,7 +89,7 @@ const { values: args, positionals } = parseArgs({
     center: { type: "string", default: "32.0715,34.7745" }, // lat,lon painted first (Rothschild / Dizengoff / beach)
   },
 });
-const areaName = positionals[0] ?? "tlv-core";
+const areaName = positionals[0] ?? "pantheon";
 const base = join(DERIVED, areaName);
 const manifest = readJson(join(base, "manifest.json"));
 const title = openArea(areaName).title;

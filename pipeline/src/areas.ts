@@ -9,17 +9,14 @@ export interface Area {
 }
 
 export const AREAS: Record<string, Area> = {
-  /** Jaffa → Yarkon Park → Ramat Gan, including the sea off the coast. */
-  "tlv-core": {
-    title: "Tel Aviv-Yafo · Ramat Gan",
-    region: "israel-center",
-    bbox: [32.035, 34.735, 32.108, 34.835],
-  },
-  /** Small test patch around Rothschild Blvd. */
-  rothschild: {
-    title: "Rothschild Blvd",
-    region: "israel-center",
-    bbox: [32.0605, 34.7705, 32.0675, 34.7795],
+  /**
+   * Small ~800 m test patch: Pantheon, Piazza della Rotonda, toward Piazza Navona.
+   * Paint and review this first before expanding to a full centro-storico area.
+   */
+  pantheon: {
+    title: "Pantheon · Piazza Navona",
+    region: "roma-centro",
+    bbox: [41.8955, 12.4700, 41.9020, 12.4815],
   },
 };
 
@@ -31,8 +28,8 @@ export function openArea(name: string): Area {
   return area;
 }
 
-/** Ground ellipsoid height used for area outlines (geoid ≈ 18 m + low terrain). */
-export const GROUND_H = 25;
+/** Ground ellipsoid height used for area outlines (geoid ≈ 45–50 m in Rome + low terrain). */
+export const GROUND_H = 55;
 
 type Pt = [number, number];
 
