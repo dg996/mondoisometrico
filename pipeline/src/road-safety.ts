@@ -1,6 +1,12 @@
 /** Traffic geometry uses the same ENU terrain and OSM water polygons as the renderer. */
 export interface TerrainMeta { x0: number; y0: number; nx: number; ny: number; step: number }
 export type Point = [number, number];
+/** Height-pass value and query height are both ellipsoid metres. Bridges have their own deck;
+ * ordinary roads also need a surface beneath them, not only the absence of an occluder. */
+export function roadSurfaceSafe(surface: number | null, height: number, requireSupport: boolean): boolean {
+  return surface !== null && Number.isFinite(surface) && Number.isFinite(height)
+    && surface <= height + 1 && (!requireSupport || surface >= height - 1.5);
+}
 export function groundAt(m: TerrainMeta, h: Float32Array, x: number, y: number): number | null {
   const fx = (x-m.x0)/m.step, fy = (y-m.y0)/m.step;
   if (fx < 0 || fy < 0 || fx >= m.nx-1 || fy >= m.ny-1) return null;

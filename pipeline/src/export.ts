@@ -31,7 +31,7 @@ import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, l
 import { HOSTING } from "./hosting.ts";
 import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
 import { CITIES, REGIONS } from "./places.ts";
-import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, type TerrainMeta, type Point } from "./road-safety.ts";
+import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, roadSurfaceSafe, type TerrainMeta, type Point } from "./road-safety.ts";
 import { readHeights } from "./heights.ts";
 import { artCoverage, paintedBounds, parseArtBounds } from "./art-coverage.ts";
 import { parseArgs } from "node:util";
@@ -442,12 +442,17 @@ async function exportRoads(areas: string[], heights: Heights) {
     for(let j=0;j<=steps;j++) {
       const off=w.w*(j/steps-0.5);
       const p: [number,number,number]=[w.s[k]+dy/length*off,w.s[k+1]-dx/length*off,w.s[k+2]];
-      const [x,y]=enuToPixel(p);
-      await heights.ensure(x,y);
-      const surf=heights.at(x,y);
-      if ((!w.bridge && w.waterAt(p[0],p[1])) || surf===null || surf>enuHeight(p)+1
-        || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
-        || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
+      if (!w.bridge && w.waterAt(p[0],p[1])) { w.s[k+3]=0; break; }
+      // A roof/overhang can cover the bus silhouette even when the road centre is clear.
+      for (const lift of [0, 1.6, 3.2]) {
+        const q: [number,number,number] = [p[0],p[1],p[2]+lift];
+        const [x,y]=enuToPixel(q);
+        await heights.ensure(x,y);
+        if (!roadSurfaceSafe(heights.at(x,y),enuHeight(q),lift===0 && !w.bridge)
+          || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
+          || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
+      }
+      if (!w.s[k+3]) break;
     }
   }
   occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);

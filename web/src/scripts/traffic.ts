@@ -13,7 +13,7 @@ export interface Road {
   l: number;        // lanes per direction (total if one-way)
   w?: number;       // carriageway width (m), as drawn on the map
   a: number; b: number; // OSM start / end node ids
-  s: number[];      // [e, n, u, visible] × samples (≈ 6 m apart)
+  s: number[];      // [e, n, u, visible] × samples (2 m in new exports; legacy ≤ 6 m)
 }
 
 type Vec3 = [number, number, number];

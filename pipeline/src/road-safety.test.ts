@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, type SafeWay } from './road-safety.ts';
+import { groundAt, inWater, roadSurfaceSafe, flattenBridgeDecks, hideBelowBanks, type SafeWay } from './road-safety.ts';
 const way = (s: number[], water: boolean[], bridge = false): SafeWay => ({s,water,bridge,y:bridge?1:0});
 test('terrain uses ground rather than visible roofs; missing data is unknown', () => {
   const m={x0:0,y0:0,nx:2,ny:2,step:10};
@@ -30,4 +30,13 @@ test('partial bridges and unsupported elevated ways stay hidden', () => {
   const w=way([0,0,50,1,10,0,60,1],[true,false],true);
   const e=way([0,0,50,1,10,0,50,1],[false,false]); e.y=1;
   flattenBridgeDecks([w,e]); assert.equal(w.s[3]+w.s[7]+e.s[3]+e.s[7],0);
+});
+
+test('height-pass support rejects roofs, floating roads, overhangs and missing samples', () => {
+  assert.equal(roadSurfaceSafe(60,60,true),true);
+  assert.equal(roadSurfaceSafe(75,60,true),false); // foreground roof covers road
+  assert.equal(roadSurfaceSafe(54,60,true),false); // no support below an ordinary road
+  assert.equal(roadSurfaceSafe(null,60,true),false);
+  assert.equal(roadSurfaceSafe(54,60,false),true); // verified OSM bridge has its own deck
+  assert.equal(roadSurfaceSafe(70,63.2,false),false); // overhang covers bus roof
 });
