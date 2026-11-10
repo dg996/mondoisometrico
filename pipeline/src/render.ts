@@ -104,6 +104,7 @@ async function main() {
       args: [...CHROME_ARGS, "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"],
     });
     const jobs = Math.min(Number(args.j), todo.length);
+    const failed: string[] = [];
     // contiguous row-major chunks keep each page's tile cache warm
     const chunk = Math.ceil(todo.length / jobs);
     await Promise.all(Array.from({ length: jobs }, async (_, w) => {
@@ -113,12 +114,14 @@ async function main() {
         try {
           await renderOne(page, x, y, outDir);
         } catch (e) {
+          failed.push(`${x}_${y}`);
           console.error(`  ${x}_${y}: FAILED ${(e as Error).message}`);
         }
       }
       await page.context().close();
     }));
     await browser.close();
+    if (failed.length) throw new Error(`render incomplete (${failed.length} tiles): ${failed.join(", ")}; do not export/publish`);
   }
 
   writeFileSync(manifestPath, JSON.stringify({
