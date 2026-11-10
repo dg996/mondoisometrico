@@ -33,6 +33,8 @@ import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
 import { CITIES, REGIONS } from "./places.ts";
 import { groundAt, inWater, flattenBridgeDecks, hideBelowBanks, type TerrainMeta, type Point } from "./road-safety.ts";
 import { readHeights } from "./heights.ts";
+import { artCoverage, paintedBounds, parseArtBounds } from "./art-coverage.ts";
+import { parseArgs } from "node:util";
 
 const TS = 512;                  // web tile size
 const SPLIT = CAMERA.tile / TS;  // web tiles per art tile edge
@@ -369,7 +371,7 @@ async function exportBorders(heights: Heights) {
   console.log(`  borders: ${feats.length} cities`);
 }
 
-/** Drivable roads as ENU polylines sampled every 4 m, each sample flagged visible/occluded. */
+/** Drivable roads as ENU polylines sampled every 2 m, each sample flagged visible/occluded. */
 async function exportRoads(areas: string[], heights: Heights) {
   const CLS: Record<string, number> = { motorway: 0, trunk: 0, primary: 1, secondary: 2, tertiary: 3, unclassified: 4, residential: 4, living_street: 5, service: 5 };
   const ways = [];
@@ -622,7 +624,13 @@ async function exportPreviews() {
 let OUT = ""; // data/web/regions/<region>
 
 async function main() {
-  const names = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+  const { values: args, positionals: names } = parseArgs({ allowPositionals: true, options: {
+    "data-only": { type: "boolean" },
+    "art-bounds": { type: "string" },
+    "check-coverage": { type: "boolean" },
+    "require-painted": { type: "boolean" },
+  } });
+  const requestedBounds = args["art-bounds"] ? parseArtBounds(args["art-bounds"]) : null;
   const areas = names.length ? names : ["roma-core"];
   const regions = new Set(areas.map((a) => openArea(a).region));
   if (regions.size !== 1) throw new Error(`export one region at a time (got ${[...regions].join(", ")})`);
@@ -648,10 +656,17 @@ async function main() {
       }
     }
   }
+  const playable = requestedBounds ?? paintedBounds(art.keys(), CAMERA.tile);
+  if (!playable) throw new Error("no painted tiles: playable area cannot be exported");
+  const coverage = artCoverage(playable, new Set(art.keys()), new Set(photo.keys()), CAMERA.tile);
+  console.log(`  paint coverage: ${JSON.stringify(coverage)}`);
+  if (args["require-painted"] && (coverage.missingPaint.length || coverage.missingRender.length))
+    throw new Error("incomplete playable coverage: finish render/paint/assemble before the final export");
+  if (args["check-coverage"]) return; // read-only preflight, no roads/tiles/world/state writes
   const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
   paintedArt = new Set(art.keys());
   await exportRoads(areas, heights); // first: the bridge decks are drawn into the painted tiles
-  if (!process.argv.includes("--data-only")) {
+  if (!args["data-only"]) {
     paintedArt = new Set(art.keys());
     await exportLayer("map", new Map([...photo, ...art])); // painted wins; unpainted fogged
     await exportLayer("photo", photo);
@@ -664,15 +679,8 @@ async function main() {
   const ox = Math.floor(x0 / block) * block, oy = Math.floor(y0 / block) * block;
   const { right: r, up: u } = axes();
   const m = CAMERA.mpp;
-  // Playable AABB = painted art tiles only (ready map). Viewer clamps pan/zoom here so you
-  // never pull back to a tiny diamond in a black void.
-  let py0 = Infinity, px0 = Infinity, py1 = -Infinity, px1 = -Infinity;
-  for (const k of art.keys()) {
-    const [tx, ty] = parse(k);
-    px0 = Math.min(px0, tx * CAMERA.tile); py0 = Math.min(py0, ty * CAMERA.tile);
-    px1 = Math.max(px1, (tx + 1) * CAMERA.tile); py1 = Math.max(py1, (ty + 1) * CAMERA.tile);
-  }
-  if (!Number.isFinite(px0)) { px0 = x0; py0 = y0; px1 = x1; py1 = y1; }
+  // Keep a release rectangle fixed while its gaps are painted; stray painted islands do not expand it.
+  const [px0, py0, px1, py1] = playable;
   const world = JSON.stringify({
     tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
     playable: [[py0, px0], [py1, px1]],

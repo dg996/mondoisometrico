@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import sharp, { type OverlayOptions } from "sharp";
 import { openArea } from "./areas.ts";
+import { parseArtBounds, tileIntersects } from "./art-coverage.ts";
 import { CAMERA, llhToPixel } from "./camera.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { DERIVED, PIPELINE, readJson, writeAtomic } from "./paths.ts";
@@ -29,8 +30,8 @@ const FEATHER = 64;
 const STYLE = join(PIPELINE, "style", "reference.png");
 const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
 const SEA = join(PIPELINE, "style", "sea.png");
-/** Fork default 0.45; Rome OSM massing is noisier so we allow a touch lower but still reject mush. */
-const MIN_MATCH = 0.40;
+/** Registration floor; landmarks do not get an exception to geometric alignment. */
+const MIN_MATCH = 0.45;
 /** Below this share of strong edges in the render (sea, sand, empty lots) the match check is skipped. */
 const MIN_TEXTURE = 0.05;
 
@@ -57,7 +58,7 @@ building footprints, edges and heights; open black areas are streets/plazas, not
 
 Redraw image 1 as detailed isometric pixel-art-style city illustration in EXACTLY the style of image 3: \
 clean crisp 3D blocks with straight vertical walls, every facade drawn with regular window grids, \
-flat roofs with rooftop details, saturated but natural colours, realistic varied trees \
+Rome roofs in muted terracotta, weathered brick and warm grey (not uniformly flat concrete), restrained warm ochre and cream plaster, realistic varied trees \
 drawn as the species of image 4 seen from above, smooth grey asphalt with lane markings, clean pavements, \
 soft even daylight, light ambient occlusion, no long shadows, no haze, no photographic noise.
 
@@ -80,7 +81,7 @@ Bridges stay LEVEL and straight across the Tiber: stone/travertine flat deck wit
 piers in the water if present in image 1 — never a road dipping into the river, never blue asphalt \
 over water, never a melted ribbon. Cars only on the deck, never floating above water or rooftops. \
 Do not add, remove, merge or move buildings or trees; do not invent trees over open streets. \
-Match saturation/hue of already-painted neighbour strips — no washed-out grey band across the tile.
+Keep travertine warm ivory, Vittoriano white marble, sampietrini charcoal grey, river muted blue-green; avoid cyan pools and neon grass. Match saturation/hue of already-painted neighbour strips — no washed-out grey band across the tile.
 - Streets, squares, parks and the Tiber stay exactly where they are; give them real texture \
 (sampietrini / pale stone paving — not orange —, crosswalks at junctions, grass, water ripples, \
 parked cars along kerbs only, no cars in the driving lanes or on water).
@@ -101,6 +102,7 @@ const { values: args, positionals } = parseArgs({
     plan: { type: "boolean", default: false },
     window: { type: "string" },
     near: { type: "string" },
+    "art-bounds": { type: "string" }, // x0,y0,x1,y1 global art px: paint only the release rectangle
     radius: { type: "string", default: "1" },
     force: { type: "boolean", default: false },
     // repaint windows painted before this time (e.g. after a style change); runs alongside a normal paint
@@ -118,7 +120,11 @@ const OLDER = args.older ? new Date(args.older).getTime() : 0;
 const mtime = (f: string) => (existsSync(f) ? statSync(f).mtimeMs : 0);
 /** painted in the current style (with --older, windows painted before the cut-off don't count) */
 const current = (i: number, j: number) => existsSync(winFile(i, j)) && mtime(winFile(i, j)) >= OLDER;
-const tileSet = new Set<string>(manifest.tiles.map((t: any) => `${t.x}_${t.y}`));
+let tileSet = new Set<string>(manifest.tiles.map((t: any) => `${t.x}_${t.y}`));
+if (args["art-bounds"]) {
+  const b = parseArtBounds(args["art-bounds"]);
+  tileSet = new Set([...tileSet].filter(k => tileIntersects(k, b, T)));
+}
 const winDir = join(base, "windows");
 mkdirSync(winDir, { recursive: true });
 
@@ -295,8 +301,10 @@ function landmarksInWindow(i: number, j: number): string[] {
   const hints: string[] = [];
   for (const L of list) {
     if (!L.paintHint) continue;
-    const [px, py] = llhToPixel(L.lat, L.lon, 25);
-    if (px >= x0 && px < x0 + WIN && py >= y0 && py < y0 + WIN) hints.push(L.paintHint);
+    const [px, py] = llhToPixel(L.lat, L.lon, SEA_H + (L.pinH ?? 16));
+    const radius = (L.paintRadiusM ?? 40) / CAMERA.mpp;
+    if (px + radius >= x0 && px - radius < x0 + WIN && py + radius >= y0 && py - radius < y0 + WIN)
+      hints.push(`${L.paintHint} Approximate ground anchor in this window: (${Math.round(px-x0)}, ${Math.round(py-y0)}) px. Follow the rendered footprint; if it crosses an edge draw ONLY the clipped part, never recenter or duplicate it.`);
   }
   return hints;
 }
@@ -330,11 +338,10 @@ async function paintWindow(i: number, j: number) {
     : "";
   const prompt = PROMPT.replace("{title}", title).replace("{out}", outSand)
     .replace("{continuation}", (edges.length ? CONTINUATION.replace("{edges}", edges.join(" and ")) : "") + landmarkBlock);
-  /** Best landmark attempt so a recognizable monument isn't discarded for a borderline geometric score. */
-  let bestLandmark: { score: number; identity: number; texture: number; out: string; r: Awaited<ReturnType<typeof register>> } | null = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     while (Date.now() < resumeAt) await sleep(Math.min(60_000, resumeAt - Date.now()));
     rmSync(outSand, { force: true });
+    rmSync(join(work, "out.png"), { force: true }); // no stale result from a previous attempt
     const t0 = Date.now();
     await codex(sand, prompt);
     // copy log + output back into the area work dir
@@ -354,35 +361,13 @@ async function paintWindow(i: number, j: number) {
       // geometric QA: undo any shift/scale drift; repaint if the output doesn't follow the render
       const r = await register(join(work, "input.png"), join(work, "out.png"));
       writeFileSync(join(work, "qa.json"), JSON.stringify(r));
-      if ((await hasDarkPatch(join(work, "out.png"), join(work, "input.png"))) && attempt < 3) {
-        console.warn(`  ${i}_${j}: black band or patch in the paint, repainting`);
+      const structured = r.texture >= MIN_TEXTURE;
+      // Failed last attempts used to slip through, and landmarks accepted scores as low as .32.
+      // Preserve any previous window on disk; report failure instead of promoting bad artwork.
+      if (await hasDarkPatch(join(work, "out.png"), join(work, "input.png"))
+          || (structured && r.score < MIN_MATCH)) {
+        console.warn(`  ${i}_${j}: rejected attempt ${attempt}, match=${r.score.toFixed(2)}`);
         continue;
-      }
-      const structured = r.texture >= MIN_TEXTURE; // open sea / empty land: correlation is meaningless
-      if (hints.length && !(await hasDarkPatch(join(work, "out.png"), join(work, "input.png")))) {
-        const cand = join(work, `out-best.png`);
-        if (!bestLandmark || r.score > bestLandmark.score) {
-          copyFileSync(join(work, "out.png"), cand);
-          bestLandmark = { score: r.score, identity: r.identity, texture: r.texture, out: cand, r };
-        }
-      }
-      if (structured && r.score < MIN_MATCH && attempt < 3) {
-        console.warn(`  ${i}_${j}: match ${r.score.toFixed(2)} < ${MIN_MATCH}, repainting`);
-        continue;
-      }
-      // Landmark windows: prefer a clean bar; if all attempts miss, keep the best that still follows the render.
-      if (structured && r.score < MIN_MATCH && hints.length) {
-        if (bestLandmark && bestLandmark.score >= bestLandmark.identity && bestLandmark.score >= MIN_MATCH - 0.08) {
-          console.warn(`  ${i}_${j}: landmark match ${r.score.toFixed(2)} < ${MIN_MATCH} — keeping best ${bestLandmark.score.toFixed(2)}`);
-          const warp = bestLandmark.score > bestLandmark.identity + 0.01;
-          await applyRegistration(bestLandmark.out, winFile(i, j), warp ? bestLandmark.r : { ...bestLandmark.r, scale: 1, dx: 0, dy: 0 });
-          console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${bestLandmark.score.toFixed(2)} (landmark best)`);
-          for (const f of ["input.png", "height.png", "style.png", "trees.png", "out.png", "out-best.png"]) rmSync(join(work, f), { force: true });
-          return;
-        }
-        console.warn(`  ${i}_${j}: match ${r.score.toFixed(2)} < ${MIN_MATCH} on landmark — discarding`);
-        rmSync(winFile(i, j), { force: true });
-        return;
       }
       const warp = structured && r.score > r.identity + 0.01;
       await applyRegistration(join(work, "out.png"), winFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
@@ -394,6 +379,7 @@ async function paintWindow(i: number, j: number) {
     }
     console.error(`  ${i}_${j}: attempt ${attempt} failed, see ${join(work, "codex.log")}`);
   }
+  throw new Error(`paint ${i}_${j} failed QA after 3 attempts; previous painting retained, batch not ready`);
 }
 
 /** Feather-blend painted windows into 1024 art tiles; only tiles fully covered are written. */
