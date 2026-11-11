@@ -68,7 +68,8 @@ async function openPage(browser: Awaited<ReturnType<typeof chromium.launch>>, di
     return route.fulfill({ body: readFileSync(file), contentType: type });
   });
   page.on("pageerror", (e) => console.error("  [page]", e.message));
-  await page.goto(`http://iso.local/?region=${area.region}&ss=${args.ss}&markers=${encodeURIComponent(args.markers!)}`);
+  // "commit": module-level ground fetches can take a while; window.ready below is the real gate.
+  await page.goto(`http://iso.local/?region=${area.region}&ss=${args.ss}&markers=${encodeURIComponent(args.markers!)}`, { timeout: 180_000, waitUntil: "commit" });
   // Parallel SwiftShader pages contend for the CPU during scene init; 30s is not enough
   // when several workers boot at once.
   await page.waitForFunction(() => window.ready === true, null, { timeout: 180_000 });
@@ -81,7 +82,12 @@ async function renderOne(page: Page, tx: number, ty: number, outDir: string) {
   const objects = existsSync(binFile) ? JSON.parse(readFileSync(binFile, "utf8")) : undefined;
   const r = await page.evaluate(([x, y, o]) => window.renderTile(x, y, o), [tx, ty, objects] as const);
   const color = Buffer.from(r.color.split(",")[1], "base64");
-  await writeAtomic(sharp(color).resize(T, T, { kernel: "lanczos3" }).png({ compressionLevel: 6 }), join(outDir, "render", `${tx}_${ty}.png`));
+  // Over-subscribed SwiftShader pages can silently render black without raising; a real tile
+  // always contains terrain, so fail the tile instead of writing a corrupt "successful" PNG.
+  const out = await sharp(color).resize(T, T, { kernel: "lanczos3" }).png({ compressionLevel: 6 }).toBuffer();
+  const stats = await sharp(out).stats();
+  if (stats.channels.every((c) => c.max === 0)) throw new Error("blank render (GPU context lost?)");
+  await writeAtomic(sharp(out), join(outDir, "render", `${tx}_${ty}.png`));
   // GL rows are bottom-up; flip so row 0 is the top of the tile.
   await writeAtomic(sharp(Buffer.from(r.height, "base64"), { raw: { width: 256, height: 256, channels: 4 } }).flip().png(), join(outDir, "height", `${tx}_${ty}.png`));
   console.log(`  ${tx}_${ty}: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
@@ -101,30 +107,46 @@ async function main() {
 
   if (todo.length) {
     const dist = await buildPage();
-    const browser = await chromium.launch({
-      // MONDO_HEADFUL=1 + DISPLAY (e.g. Xvfb) for hosts where headless ANGLE/SwiftShader
-      // cannot create a WebGL context (xcb_connect fails without an X server).
-      executablePath: CHROME, headless: process.env.MONDO_HEADFUL !== "1",
-      args: [...CHROME_ARGS, "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"],
-    });
     const jobs = Math.min(Number(args.j), todo.length);
     const failed: string[] = [];
     // contiguous row-major chunks keep each page's tile cache warm
     const chunk = Math.ceil(todo.length / jobs);
+    // SwiftShader's GPU process silently degrades after a few dozen heavy tiles (renders turn
+    // black without raising), so recycle the whole browser every SUB tiles per worker.
+    const SUB = 40;
+    const launch = () =>
+      chromium.launch({
+        // MONDO_HEADFUL=1 + DISPLAY (e.g. Xvfb) for hosts where headless ANGLE/SwiftShader
+        // cannot create a WebGL context (xcb_connect fails without an X server).
+        executablePath: CHROME, headless: process.env.MONDO_HEADFUL !== "1",
+        args: [...CHROME_ARGS, "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"],
+      });
     await Promise.all(Array.from({ length: jobs }, async (_, w) => {
       const mine = todo.slice(w * chunk, (w + 1) * chunk);
-      const page = await openPage(browser, dist);
-      for (const [x, y] of mine) {
+      for (let s = 0; s < mine.length; s += SUB) {
+        const batch = mine.slice(s, s + SUB);
+        const browser = await launch();
         try {
-          await renderOne(page, x, y, outDir);
-        } catch (e) {
-          failed.push(`${x}_${y}`);
-          console.error(`  ${x}_${y}: FAILED ${(e as Error).message}`);
+          const page = await openPage(browser, dist);
+          for (let b = 0; b < batch.length; b++) {
+            const [x, y] = batch[b];
+            try {
+              await renderOne(page, x, y, outDir);
+            } catch (e) {
+              failed.push(`${x}_${y}`);
+              console.error(`  ${x}_${y}: FAILED ${(e as Error).message}`);
+              if (/blank render/.test((e as Error).message)) {
+                // wedged context: the rest of this batch needs a fresh browser (next pass)
+                for (let r = b + 1; r < batch.length; r++) failed.push(`${batch[r][0]}_${batch[r][1]}`);
+                break;
+              }
+            }
+          }
+        } finally {
+          await browser.close().catch(() => {});
         }
       }
-      await page.context().close();
     }));
-    await browser.close();
     if (failed.length) throw new Error(`render incomplete (${failed.length} tiles): ${failed.join(", ")}; do not export/publish`);
   }
 
