@@ -569,7 +569,6 @@ async function deepWater(i: number, j: number) {
     if (y) v = Math.min(v, d[(y - 1) * n + x] + 1);
     if (x && y) v = Math.min(v, d[(y - 1) * n + x - 1] + 1.414);
     if (y && x < n - 1) v = Math.min(v, d[(y - 1) * n + x + 1] + 1.414);
-    if (y && x < n - 1) v = Math.min(v, d[(y - 1) * n + x - 1] + 1.414);
     d[y * n + x] = v;
   }
   for (let y = n - 1; y >= 0; y--) for (let x = n - 1; x >= 0; x--) {
