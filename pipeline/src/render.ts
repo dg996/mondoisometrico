@@ -69,7 +69,9 @@ async function openPage(browser: Awaited<ReturnType<typeof chromium.launch>>, di
   });
   page.on("pageerror", (e) => console.error("  [page]", e.message));
   await page.goto(`http://iso.local/?region=${area.region}&ss=${args.ss}&markers=${encodeURIComponent(args.markers!)}`);
-  await page.waitForFunction(() => window.ready === true, null, { timeout: 30_000 });
+  // Parallel SwiftShader pages contend for the CPU during scene init; 30s is not enough
+  // when several workers boot at once.
+  await page.waitForFunction(() => window.ready === true, null, { timeout: 180_000 });
   return page;
 }
 
