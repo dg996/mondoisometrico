@@ -1,6 +1,7 @@
 /**
  * Repaint the open-data 3D render into crisp, realistic isometric art with the local Codex CLI
- * (ChatGPT login, built-in image generation; no API key).
+ * (ChatGPT login, built-in image generation; no API key) or, with PAINT_BACKEND=agentgw,
+ * the agent-gw image generation service (KIMI_API_KEY or ~/.kimi/agent-gw.json).
  *
  * Painting happens in overlapping 1024px windows on a global grid (stride 896). Each window gets
  * its already-painted neighbours (any side) pasted into the 128 px overlap, then windows are feather-blended
@@ -229,7 +230,7 @@ async function composeInput(i: number, j: number, file: string, heightFile: stri
 /** Codex/ChatGPT usage or rate limit: every worker pauses until `resumeAt`, then retries. */
 let resumeAt = 0, backoff = 0;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const LIMIT = /usage limit|rate.?limit|too many requests|\b429\b|quota/i;
+const LIMIT = /usage limit|rate.?limit|too many requests|too many concurrent|\b429\b|quota/i;
 
 /** How long a limit message asks us to wait (ms); falls back to exponential backoff 5 → 60 min. */
 function limitWait(log: string) {
@@ -268,6 +269,84 @@ function codex(cwd: string, prompt: string): Promise<void> {
     p.stdin!.end(prompt);
   });
 }
+
+/**
+ * Alternative paint backend: agent-gw image generation (PAINT_BACKEND=agentgw).
+ * Same window contract as codex(): reads input/height/style/trees from `cwd`,
+ * writes out.png there, appends its log to codex.log so rate-limit handling
+ * and QA stay unchanged. Reference-image URLs for the static style/trees
+ * sheets are uploaded once and cached under the area dir; input/height are
+ * uploaded per window (they change every time).
+ */
+const GW_SCRIPT = join(PIPELINE, "scripts", "agentgw_paint.py");
+const GW_REFS = () => join(base, "agentgw-refs.json");
+
+function gwRefs(): Record<string, { size: number; mtimeMs: number; url: string }> {
+  try { return JSON.parse(readFileSync(GW_REFS(), "utf8")); } catch { return {}; }
+}
+
+function gwRun(args: string[], logFile: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const log = openSync(logFile, "a");
+    const p = spawn("python3", [GW_SCRIPT, ...args], { stdio: ["ignore", log, log] });
+    const timer = setTimeout(() => p.kill("SIGTERM"), 900_000);
+    p.on("error", (e) => { clearTimeout(timer); closeSync(log); reject(e); });
+    p.on("close", (code) => { clearTimeout(timer); closeSync(log); resolve(code ?? 1); });
+  });
+}
+
+async function gwUpload(file: string, logFile: string): Promise<string> {
+  // small helper process: capture stdout (the signed_url) instead of the log
+  const out = join("/tmp/mondoisometrico-paint", areaName, `upload-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+  const code = await new Promise<number>((resolve, reject) => {
+    const log = openSync(logFile, "a"), outFd = openSync(out, "w");
+    const p = spawn("python3", [GW_SCRIPT, "upload", "--image-path", file], { stdio: ["ignore", outFd, log] });
+    p.on("error", reject);
+    p.on("close", (c) => { closeSync(log); closeSync(outFd); resolve(c ?? 1); });
+  });
+  if (code !== 0) throw new Error(`agent-gw upload failed for ${file} (see ${logFile})`);
+  return readFileSync(out, "utf8").trim();
+}
+
+async function gwRef(file: string, logFile: string): Promise<string> {
+  const st = statSync(file);
+  const refs = gwRefs();
+  const hit = refs[file];
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.url;
+  const url = await gwUpload(file, logFile);
+  refs[file] = { size: st.size, mtimeMs: st.mtimeMs, url };
+  writeFileSync(GW_REFS(), JSON.stringify(refs, null, 2));
+  return url;
+}
+
+/** Strip the Codex tool-calling scaffolding; the craft/landmark body is shared. */
+function agentgwPrompt(p: string): string {
+  return p
+    .replace(/Do these steps in order[\s\S]*?5\) Call image_gen to EDIT input\.png \(input\.png is the BASE — do not invent a new layout\)\.\n/,
+      "Edit reference image 1 (the base render): repaint it as detailed isometric art. Do not invent a new layout.\n")
+    .replace("Four images are attached:", "Four reference images are attached, in order:")
+    .replace(/\n6\) Copy the generated PNG[\s\S]*$/, "\n");
+}
+
+async function agentgw(cwd: string, prompt: string): Promise<void> {
+  const logFile = join(cwd, "codex.log"); // same file the limit/QA plumbing already reads
+  const refs = [
+    await gwUpload(join(cwd, "input.png"), logFile),
+    await gwUpload(join(cwd, "height.png"), logFile),
+    await gwRef(join(cwd, "style.png"), logFile),
+    await gwRef(join(cwd, "trees.png"), logFile),
+  ];
+  writeFileSync(join(cwd, "prompt.txt"), agentgwPrompt(prompt));
+  const code = await gwRun([
+    "paint", "--description-file", join(cwd, "prompt.txt"), "--output", join(cwd, "out.png"),
+    ...refs.flatMap((u) => ["--ref", u]),
+  ], logFile);
+  if (code !== 0) return; // no out.png: caller treats as a failed attempt
+}
+
+/** Active painter: local Codex CLI by default, agent-gw when PAINT_BACKEND=agentgw. */
+const runPainter: (cwd: string, prompt: string) => Promise<void> =
+  process.env.PAINT_BACKEND === "agentgw" ? agentgw : codex;
 
 /** Share of a window's surface at sea level (from the height pass). */
 async function seaFraction(i: number, j: number) {
@@ -354,7 +433,7 @@ async function paintWindow(i: number, j: number) {
     console.log(`  ${i}_${j}: sea texture`);
     return;
   }
-  // durable debug copy under data/; Codex itself runs in /tmp outside the git root
+  // durable debug copy under data/; the painter itself runs in /tmp outside the git root
   const work = join(base, "work", `${i}_${j}`);
   const sand = join("/tmp/mondoisometrico-paint", areaName, `${i}_${j}`);
   mkdirSync(work, { recursive: true });
@@ -377,16 +456,16 @@ async function paintWindow(i: number, j: number) {
     rmSync(outSand, { force: true });
     rmSync(join(work, "out.png"), { force: true }); // no stale result from a previous attempt
     const t0 = Date.now();
-    await codex(sand, prompt);
+    await runPainter(sand, prompt);
     // copy log + output back into the area work dir
     if (existsSync(join(sand, "codex.log"))) copyFileSync(join(sand, "codex.log"), join(work, "codex.log"));
     if (existsSync(outSand)) copyFileSync(outSand, join(work, "out.png"));
     if (!existsSync(join(work, "out.png"))) {
-      const log = readFileSync(join(work, "codex.log"), "utf8").slice(-4000);
+      const log = existsSync(join(work, "codex.log")) ? readFileSync(join(work, "codex.log"), "utf8").slice(-4000) : "";
       if (LIMIT.test(log)) {
         const wait = limitWait(log);
         resumeAt = Math.max(resumeAt, Date.now() + wait);
-        console.warn(`  ${i}_${j}: Codex limit reached, pausing all workers until ${new Date(resumeAt).toLocaleTimeString()}`);
+        console.warn(`  ${i}_${j}: painter limit reached, pausing all workers until ${new Date(resumeAt).toLocaleTimeString()}`);
         attempt--; // a limit is not the window's fault: retry without using up an attempt
         continue;
       }
