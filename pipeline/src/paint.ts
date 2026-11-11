@@ -332,6 +332,18 @@ function landmarksInWindow(i: number, j: number): string[] {
 }
 
 async function paintWindow(i: number, j: number) {
+  const skipFile = join(base, "paint-skip.json");
+  if (existsSync(skipFile) && !args.force) {
+    try {
+      const skip = JSON.parse(readFileSync(skipFile, "utf8")) as string[];
+      if (Array.isArray(skip) && skip.includes(`${i}_${j}`)) {
+        console.warn(`  ${i}_${j}: skipped (paint-skip.json); will retry later`);
+        throw new Error(`paint ${i}_${j} skipped for later retry; batch not ready`);
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("skipped for later")) throw e;
+    }
+  }
   if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) return;
   // open sea: reuse the painted sea texture (mirrored per window so repeats don't line up)
   if (existsSync(SEA) && (await seaFraction(i, j)) >= 0.995) {
@@ -481,12 +493,17 @@ async function harmoniseSea() {
   console.log(`  sea: ${means.length} windows with open water, reference rgb(${ref.map(Math.round).join(",")})`);
 }
 
-async function assemble(all = false) {
+async function assemble(all = false, strictPalette = true) {
   const windowFiles = paletteFiles();
   const palette = await windowPalette(windowFiles);
   const seams = palette.residuals.filter(r=>r.error>12);
   writeFileSync(join(base,"palette-qa.json"),JSON.stringify({offsets:Object.fromEntries(palette.offsets),residuals:palette.residuals},null,2));
-  if(seams.length) throw new Error(`palette QA: ${seams.length} incompatible overlaps; repaint windows listed in palette-qa.json before export`);
+  if(seams.length) {
+    const msg = `palette QA: ${seams.length} incompatible overlaps; repaint windows listed in palette-qa.json before export`;
+    // Mid-batch ring assembly must not abort hours of painting; only the final assemble fails closed.
+    if (strictPalette) throw new Error(msg);
+    console.warn(`  ${msg} (continuing; will recheck at the end)`);
+  }
   // A new neighbour can change the component correction. Rebuild all complete tiles together.
   all = true;
   const ramp = new Float32Array(WIN);
@@ -558,7 +575,8 @@ async function main() {
     wins = old;
   }
   if (args.plan) return console.log(`${wins.length} windows`);
-  if (args.assemble) { /* palette QA in assemble covers water and land together */ return assemble(true); }
+  // MONDO_SOFT_PALETTE=1: preview/partial batches may assemble despite seam residuals (not for final publish).
+  if (args.assemble) { /* palette QA in assemble covers water and land together */ return assemble(true, process.env.MONDO_SOFT_PALETTE !== "1"); }
   // single-window mode: paint just that cell and assemble once (no 9000 empty rings)
   if (args.window) {
     const [wi, wj] = wins[0];
@@ -596,6 +614,8 @@ async function main() {
       rmSync(winFile(i, j), { force: true });
     }
   }
+  // One hard window must not abort siblings mid-ring: keep painting, then fail closed at the end.
+  const failed: string[] = [];
   for (let r = 0; r <= maxR; r++) {
     const ring: Array<[number, number]> = [];
     if (r === 0) ring.push([ci, cj]);
@@ -609,14 +629,25 @@ async function main() {
     for (const pass of [0, 1]) {
       const todo = ring.filter(([i, j], k) => k % 2 === pass && have.has(`${i}_${j}`));
       if (!todo.length) continue;
-      await pool(todo, Number(args.j), ([i, j]) => paintWindow(i, j));
+      await pool(todo, Number(args.j), async ([i, j]) => {
+        try { await paintWindow(i, j); }
+        catch (err) {
+          failed.push(`${i}_${j}`);
+          console.error(`  ${i}_${j}: ${err instanceof Error ? err.message : err}`);
+        }
+      });
       painted += todo.length;
     }
-    if (painted) await assemble(); // finished tiles become visible ring by ring
+    if (painted) await assemble(false, false); // finished tiles become visible ring by ring
   }
   /* palette QA in assemble covers water and land together */ // then every tile with open water is rebuilt with the harmonised sea
-  await assemble(!args.window);
+  await assemble(!args.window, true);
   writeFileSync(join(base, "paint.json"), JSON.stringify({ updated: new Date().toISOString() }));
+  if (failed.length) {
+    const report = join(base, "paint-failed.json");
+    writeFileSync(report, JSON.stringify({ failed, updated: new Date().toISOString() }, null, 2));
+    throw new Error(`paint failed QA for ${failed.length} windows (${failed.slice(0, 12).join(", ")}${failed.length > 12 ? "…" : ""}); see ${report}; batch not ready`);
+  }
 }
 
 main();
