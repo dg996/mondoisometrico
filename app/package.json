@@ -1,0 +1,22 @@
+{
+  "name": "roma-isometrica-viva",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "build_dir=\"dist-release-$$\" && old_dir=\"dist-previous-$$\" && vite build --outDir \"$build_dir\" && cp -r public/. \"$build_dir/\" && sleep 1 && test -s \"$build_dir/index.html\" && test -s \"$build_dir/map/rome.dzi\" && test -s \"$build_dir/map/rome-painted.jpg\" && test -s \"$build_dir/data/rome-osm.json\" && python3 -c \"from pathlib import Path; s=Path('public'); d=Path('$build_dir'); files=[p for p in s.rglob('*') if p.is_file()]; assert len(list((s/'map/rome_files').rglob('*.jpg'))) >= 200; assert all((d/p.relative_to(s)).is_file() and p.read_bytes() == (d/p.relative_to(s)).read_bytes() for p in files)\" && if [ -d dist ]; then mv dist \"$old_dir\"; fi && mv \"$build_dir\" dist && (rm -rf \"$old_dir\" 2>/dev/null || true)",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@fontsource/cormorant-garamond": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
+    "openseadragon": "^5.0.1"
+  },
+  "devDependencies": {
+    "@mapbox/vector-tile": "^3.0.0",
+    "pbf": "^5.1.2",
+    "pmtiles": "^4.5.0",
+    "vite": "^7.2.2"
+  }
+}
