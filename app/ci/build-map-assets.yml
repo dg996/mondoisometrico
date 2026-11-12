@@ -1,0 +1,52 @@
+# GitHub Action pronta ma NON attiva: spostare questo file in
+# .github/workflows/build-map-assets.yml (richiede token con scope `workflow`).
+# Rigenera gli asset binari della mappa (tile Deep Zoom + dataset) e li committa su main.
+
+name: build-map-assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python deps (renderer)
+        run: pip install shapely pyproj pillow numpy
+
+      - name: Node deps
+        run: npm install
+        working-directory: app
+
+      - name: Estrazione PMTiles OSM/Overture -> NDJSON
+        run: node scripts/extract-rome-vector.mjs
+        working-directory: app
+
+      - name: Render mappa isometrica + tile Deep Zoom + dataset
+        run: python3 scripts/build-rome-map.py
+        working-directory: app
+
+      - name: Commit asset generati
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/public
+          if git diff --cached --quiet; then
+            echo "nessuna modifica agli asset"
+          else
+            git commit -m "chore(assets): rigenera tile mappa e dataset da pipeline OSM/Overture"
+            git push
+          fi

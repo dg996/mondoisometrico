@@ -1,7 +1,7 @@
 {
-  "buildCommand": "npm run build",
-  "outputDirectory": "web/dist",
-  "installCommand": "npm install",
+  "buildCommand": "cd app && npm install && npm run build",
+  "outputDirectory": "app/dist",
+  "installCommand": "npm install --prefix app",
   "framework": null,
   "git": {
     "deploymentEnabled": true

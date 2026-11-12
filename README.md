@@ -1,49 +1,32 @@
 # Mondo Isometrico
 
-Mappa isometrica di **Roma** costruita da open data.
+Mappa isometrica 2D di Roma costruita da dati aperti (OpenStreetMap/HDX, Overture Maps), con traffico simulato vincolato alle geometrie reali, meteo e orario di Roma in tempo reale.
 
-**Sito:** [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
+## Layout del repository
 
-## Cosa c’è
+- `app/` — **versione corrente**: viewer Vite + OpenSeadragon. La base cartografica è un'immagine Deep Zoom generata da una pipeline Python (Pillow + Shapely) a partire da estratti PMTiles OSM/Overture.
+- `pipeline/`, `web/`, `worker/` — codebase precedente (render 3D + paint pipeline), mantenuta per riferimento storico. Non fa più parte del deploy.
 
-- Regione `roma-centro` (origine: Piazza Venezia, heading 45°)
-- Città `/roma` (default) — Pantheon / centro storico
-- Area di test `pantheon` (~800 m: Pantheon → Piazza Navona)
-- Tile su Cloudflare R2 (`mondoisometricotiles`), sito su Vercel + Worker Cloudflare
+## Quickstart (nuova versione)
 
-## Avvio rapido
-
-Serve Node 24+, Chromium/Chrome (`CHROME_PATH`), e per publish/deploy un account Cloudflare + wrangler.
-
-```sh
-cp .env.example .env   # TILES_ORIGIN, CLOUDFLARE_ACCOUNT_ID, SITE_DOMAIN
+```bash
+cd app
 npm install
-npm run dev            # http://localhost:<port>/roma
+node scripts/extract-rome-vector.mjs   # scarica estratti PMTiles OSM/Overture in .cache/
+python3 scripts/build-rome-map.py      # richiede: pip install shapely pyproj pillow numpy
+npm run build                          # produce dist/ con assertion di integrità
+npm run dev                            # sviluppo locale
 ```
 
-Batch Roma, QA e rilascio unico: **[docs/roma-quality-batch.md](docs/roma-quality-batch.md)**.
-Hosting e DNS: **[HOSTING.md](HOSTING.md)**.  
-Regole pipeline / agenti: **[AGENTS.md](AGENTS.md)**.
+Dettagli completi in [HANDOFF.md](HANDOFF.md) e [app/CREDITS.md](app/CREDITS.md).
 
-## Pipeline (patch di test)
+## Deploy
 
-```sh
-npm -w pipeline run boundaries -- roma-centro
-npm run fetch -- pantheon
-npm run ground -- pantheon
-npm run scene -- pantheon
-npm run render -- pantheon -j 2
-npm run paint -- pantheon --center 41.8986,12.4769   # Codex CLI; rivedere prima di espandere
-npm run export -- pantheon
-npm run publish -- roma-centro   # solo con conferma esplicita
-npx vercel --prod              # solo dopo QA e publish R2 del batch completo
-```
+Vercel builda `app/` (vedi `vercel.json`). Gli asset binari generati (tile Deep Zoom, dataset) **non sono nel repo**: si rigenerano con la pipeline sopra. Una GitHub Action pronta è in `app/ci/build-map-assets.yml` — va spostata in `.github/workflows/` (il token OAuth usato per il push non aveva lo scope `workflow`, quindi non è stato possibile committarla direttamente lì).
 
-## Licenza
+## Fonti dati
 
-Codice: [MIT](LICENSE).  
-Immagini della mappa: CC BY 4.0 + crediti dati in [ATTRIBUTION.md](ATTRIBUTION.md).
-
----
-
-Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun.
+- © OpenStreetMap contributors (ODbL 1.0), estratti HDX/HOT per Italia e Città del Vaticano
+- Overture Maps (base theme, include ESA WorldCover 2021)
+- Meteo: Open-Meteo (senza API key)
+- Copernicus Sentinel-2 L2A come riferimento documentario

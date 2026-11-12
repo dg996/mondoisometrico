@@ -1,27 +1,11 @@
-# secrets: never commit (see .env.example)
+node_modules
+dist
+dist-release-*
+dist-previous-*
+.cache
+__pycache__
+*.pyc
 .env
 .env.*
 !.env.example
-
-# dependencies, builds, caches
-node_modules/
-web/dist/
-web/.astro/
-.wrangler/
-pipeline/page/dist/
-
-# pipeline data (raw downloads, renders, paintings, export cache, publish state): local only, map data lives on R2
-data/
-web/public/regions/
-
-
-*.log
 .DS_Store
-.idea/
-
-# Agent skills (local)
-.agents/
-.vercel
-.env
-.env.*
-!.env.example
