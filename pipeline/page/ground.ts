@@ -15,10 +15,11 @@ const FILL: Record<string, string> = {
   farm: "#c9cd8c", dirt: "#d2b98f", cemetery: "#b2c798",
   park: "#9dcb6c", wood: "#73a851", scrub: "#adbb7b", sand: "#eedbab", pitch: "#6db35a", track: "#c97a5c",
   playground: "#dccba1", parking: "#bebcb7", paving: "#e6e0d4", water: "#3f95c2", pool: "#5ccbe6",
+  excavation: "#bfa27a",
 };
 /** paint order of area kinds: broad landuse first, details on top */
 const AREA_ORDER = ["residential", "commercial", "industrial", "campus", "farm", "dirt", "cemetery", "scrub", "wood",
-  "park", "sand", "parking", "paving", "pitch", "track", "playground", "water", "pool"];
+  "park", "sand", "parking", "paving", "excavation", "pitch", "track", "playground", "water", "pool"];
 const BASE = "#d9d3c4";
 const SEA = "#2c80b2", SHALLOW = "#4ea6cb";
 const ASPHALT: Record<string, string> = { highway: "#6c7077", street: "#7b7e85", lane: "#8b8d91", dirtroad: "#c3ab82" };
@@ -60,6 +61,12 @@ export function drawGround(
     if (k === "pitch") { ctx.lineWidth = 0.25; ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.stroke(); }
     if (k === "pool") { ctx.lineWidth = 0.6; ctx.strokeStyle = "#e9ecee"; ctx.stroke(); }
     if (k === "water") { ctx.lineWidth = 1; ctx.strokeStyle = "rgba(220,235,240,0.5)"; ctx.stroke(); }
+    if (k === "excavation") { // sunken: a dark rim on the inside reads as the drop from the street
+      ctx.save(); path(f.r!); ctx.clip("evenodd");
+      ctx.lineWidth = 5; ctx.strokeStyle = "rgba(70,52,34,0.45)"; ctx.stroke();
+      ctx.lineWidth = 1.2; ctx.strokeStyle = "rgba(40,30,20,0.6)"; ctx.stroke();
+      ctx.restore();
+    }
   }
 
   // 2. sea: deep, shallows along the shore (clipped to the water), surf line

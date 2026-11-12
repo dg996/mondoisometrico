@@ -126,6 +126,7 @@ function areaKind(t: Record<string, string>): string | null {
   const lu = t.landuse, le = t.leisure, na = t.natural, am = t.amenity;
   if (na === "water" || t.water || t.waterway === "riverbank" || lu === "basin" || lu === "reservoir") return "water";
   if (le === "swimming_pool") return "pool";
+  if (t.historic === "archaeological_site") return "excavation"; // only small sites (size checked below)
   if (na === "beach" || na === "sand") return "sand";
   if (le === "pitch" || le === "stadium") return "pitch";
   if (le === "track") return "track";
@@ -278,6 +279,12 @@ for (const el of osm.elements) {
   if (!k) continue;
   const r = rings.map((q) => simplifyRing(q, 0.3)).filter((q) => q.length >= 4);
   if (!r.length) continue;
+  // an excavation (Area Sacra di Largo Argentina, Crypta Balbi…) is drawn sunken; whole archaeological
+  // parks (Fori, Palatino, Caracalla) keep their lawns and paths
+  if (k === "excavation") {
+    const A = Math.abs(r[0].reduce((a, p, i) => { const q = r[0][(i + 1) % r[0].length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2);
+    if (A > 40000) continue;
+  }
   features.push({ k, r });
   if (k === "water") water.push(r);
 }

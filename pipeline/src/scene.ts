@@ -339,7 +339,10 @@ for (const el of osm.elements) {
   // Skip anonymous ruins / dig footprints — but keep named landmarks (Colosseum is
   // historic=archaeological_site + building=amphitheatre; dropping it left an empty park).
   const ruinLike = t.building === "ruins" || t.historic === "ruins" || t.historic === "archaeological_site";
-  if (ruinLike && !lh && t.building !== "amphitheatre" && !isMonument) continue;
+  // mapped ruins (temple podiums, column bases: Area Sacra, Fori) are low travertine stubs, kept down to
+  // single columns; only a whole archaeological site outline is not a building
+  const ruinStub = !lh && t.building !== "amphitheatre" && (t.ruins === "yes" || t.building === "ruins" || t.historic === "ruins") && t.historic !== "archaeological_site";
+  if (ruinLike && !ruinStub && !lh && t.building !== "amphitheatre" && !isMonument) continue;
   if (!t.building && !isPart && !isFountain && !isMonument) continue;
   const rings = outerRings(el);
   if (!rings.length) continue;
@@ -347,7 +350,7 @@ for (const el of osm.elements) {
   // (OSM Colosseum / Vittoriano put arena voids and stub fragments as extra outers).
   const solid: P2[][] = [];
   for (const coords of rings) {
-    const ring = ringFromLonLat(coords, isPart ? 0.1 : 25);
+    const ring = ringFromLonLat(coords, isPart ? 0.1 : ruinStub ? 0.5 : 25);
     if (!ring) continue;
     solid.push(ring);
   }
@@ -368,6 +371,13 @@ for (const el of osm.elements) {
     const holes = outerRings(el,"inner").map(coords=>ringFromLonLat(coords,0.1)).filter((r):r is P2[]=>!!r && inside(r[0],ring));
     // OSM rings already encode geographic orientation: never rotate an entire footprint
     // to expose a facade to the camera. Real tagged heights precede fallback massing.
+    if (ruinStub) {
+      const a = Math.abs(area2(ring));
+      const h = parseFloat(t.height) || (a < 6 ? 6 : a < 60 ? 3.5 : 2.5); // columns stand, podiums are low
+      buildings.push({ ring, h, s: 8, g: null, keepInPlaza: true, detail: { part: false, minHeight: 0, roofHeight: 0, wallColor: "#d8cdb3", roofColor: "#cbbfa6" } });
+      osmCount++; part++;
+      continue;
+    }
     const historic = ROMA && insideRing(c, WALLS);
     const inMonument = isPart && monumentRings.some((r) => insideRing(c, r));
     const look = ROMA ? romanLook(t, historic, !!lh || isFountain || isMonument || inMonument, hash(el.id * 7 + part), hash(el.id * 13 + part + 1)) : null;

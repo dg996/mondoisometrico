@@ -31,6 +31,11 @@ export const LANDMARKS: Record<string, Landmark[]> = {
     },
     { name: "Piazza Navona", lat: 41.898928, lon: 12.473118, minPx: 0.1, groundMsl: 22 },
     {
+      // OSM way 23955329 (historic=archaeological_site) centroid
+      paintRadiusM: 45, name: "Area Sacra di Largo Argentina", lat: 41.895402, lon: 12.476869, minPx: 0.18, groundMsl: 22,
+      paintHint: "Area Sacra di Largo Argentina (keep the exact OSM outline): a SUNKEN archaeological excavation about 5 m below the surrounding streets, walled and railed all round, with the travertine and tufa podiums of four Republican temples, standing column stumps, a round temple, grass patches and stone paths between them. It is NOT a paved square with trees and NOT level with the street; the medieval Torre del Papito stands at its corner.",
+    },
+    {
       // OSM way 52333460 centroid; the church closes the WEST side of the piazza
       frontBearing: 90, paintRadiusM: 40, name: "Sant'Agnese in Agone", lat: 41.898751, lon: 12.472661, minPx: 0.16, groundMsl: 25,
       paintHint: "Sant'Agnese in Agone (Borromini, keep exact OSM footprint): Baroque church on the WEST side of Piazza Navona with a concave travertine facade facing EAST onto the piazza (toward upper-right in this camera), two bell towers at the ends of the facade, and a tall drum with a lead-grey ribbed dome and lantern behind the facade. Not a flat roofed block.",
