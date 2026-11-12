@@ -96,6 +96,56 @@ export const LANDMARKS: Record<string, Landmark[]> = {
       frontBearing: 250, paintRadiusM: 45, name: "Museo dell'Ara Pacis", lat: 41.906144, lon: 12.475459, minPx: 0.16, groundMsl: 18,
       paintHint: "Museo dell'Ara Pacis (Richard Meier, 2006): a modern white travertine and glass pavilion with a flat roof and a long glass hall facing the Lungotevere (west), enclosing the marble altar. NOT a Roman palazzo, NO tiled roof.",
     },
+    {
+      // OSM way 23055100 (place=square) centroid
+      frontBearing: 315, paintRadiusM: 60, name: "Campidoglio", lat: 41.893287, lon: 12.482975, minPx: 0.12, groundMsl: 40,
+      paintHint: "Piazza del Campidoglio (Michelangelo): trapezoidal piazza on the Capitoline hill with the oval star-pattern pavement and the equestrian statue of Marcus Aurelius at its centre, Palazzo Senatorio with its bell tower at the back, the twin Palazzi dei Conservatori and Nuovo on the sides; the Cordonata ramp-stairs descend north-west to Piazza d'Aracoeli. Follow the exact footprints.",
+    },
+    {
+      // OSM relation 3376015 centroid
+      paintRadiusM: 25, name: "Colonna Traiana", lat: 41.895792, lon: 12.484268, minPx: 0.16, groundMsl: 18,
+      paintHint: "Trajan's Column: a single tall slender marble column (about 35 m) with a spiral relief band, a bronze statue on top, standing in the excavated Forum of Trajan next to two domed churches. Draw it as a thin tall column, not a tower or a building.",
+    },
+    {
+      // OSM relation 13353039 centroid
+      paintRadiusM: 70, name: "Mercati di Traiano", lat: 41.895427, lon: 12.486011, minPx: 0.12, groundMsl: 25,
+      paintHint: "Trajan's Markets: a large semicircular brick complex of ancient shops in tiers, cut into the hill above the excavated Forum of Trajan (columns, fragments, grass), with the medieval brick Torre delle Milizie behind. Exposed Roman brick, not plastered palazzi.",
+    },
+    {
+      // OSM relation 11384819 centroid
+      paintRadiusM: 260, name: "Circo Massimo", lat: 41.886080, lon: 12.485579, minPx: 0.06, groundMsl: 15,
+      paintHint: "Circus Maximus: the long grassy valley of the ancient chariot-racing stadium, an elongated oval track of grass and paths with a raised central spina line, between the Palatine ruins and the Aventine; NO buildings inside the oval.",
+    },
+    {
+      // OSM way 86217821 centroid
+      paintRadiusM: 50, name: "Teatro di Marcello", lat: 41.891957, lon: 12.479704, minPx: 0.14, groundMsl: 15,
+      paintHint: "Theatre of Marcellus: an ancient Roman theatre with a curved two-storey facade of travertine arches (Doric and Ionic orders) topped by a Renaissance palazzo, standing beside three columns of the Temple of Apollo Sosianus in an open archaeological lawn.",
+    },
+    {
+      // OSM way 120854225 centroid
+      frontBearing: 280, paintRadiusM: 35, name: "Bocca della Verità", lat: 41.888118, lon: 12.481702, minPx: 0.16, groundMsl: 15,
+      paintHint: "Santa Maria in Cosmedin: a small brick Romanesque church with a tall slender brick bell tower and a porch on its west front (the Bocca della Verità is under the porch), facing the open Piazza Bocca della Verità with the round Temple of Hercules and the Temple of Portunus.",
+    },
+    {
+      // OSM way 131564482 centroid
+      frontBearing: 135, paintRadiusM: 90, name: "Santa Maria Maggiore", lat: 41.897595, lon: 12.498457, minPx: 0.1, groundMsl: 55,
+      paintHint: "Basilica di Santa Maria Maggiore: a huge basilica with a Baroque loggia facade facing south-east onto its piazza (with a tall column), the tallest Romanesque bell tower in Rome, two domes at the sides, the curved rear facade and an obelisk to the north-west. Travertine and plaster, terracotta roofs.",
+    },
+    {
+      // OSM relation 36444 centroid
+      frontBearing: 100, paintRadiusM: 110, name: "San Giovanni in Laterano", lat: 41.885761, lon: 12.505622, minPx: 0.08, groundMsl: 45,
+      paintHint: "Archbasilica of San Giovanni in Laterano: a vast basilica whose giant white travertine facade with 15 colossal statues on the top faces east onto Piazza di Porta San Giovanni; the Lateran palace and the tallest obelisk of Rome on the north side, the Baptistery octagon behind.",
+    },
+    {
+      // OSM relation 13476232 centroid
+      paintRadiusM: 160, name: "Terme di Caracalla", lat: 41.878885, lon: 12.492404, minPx: 0.08, groundMsl: 20,
+      paintHint: "Baths of Caracalla: enormous ruined brick halls without roofs, tall broken walls and arches, mosaic floor fragments, set in a large green park with umbrella pines. Exposed Roman brick ruins, NOT roofed buildings.",
+    },
+    {
+      // OSM way 432946457 centroid
+      paintRadiusM: 25, name: "Piramide Cestia", lat: 41.876456, lon: 12.480856, minPx: 0.14, groundMsl: 18,
+      paintHint: "Pyramid of Cestius: a steep white marble pyramid (about 36 m) built into the Aurelian walls next to Porta San Paolo. Clean pointed pyramid, white stone.",
+    },
     { name: "Piazza del Popolo", lat: 41.910748, lon: 12.476365, minPx: 0.1, groundMsl: 18 },
     { name: "Campo de' Fiori", lat: 41.895577, lon: 12.472159, minPx: 0.14, groundMsl: 23 },
   ],
