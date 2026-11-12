@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#eee6d5">
+  <meta name="description" content="Roma isometrica da geometrie OpenStreetMap/Overture: traffico simulato su strade reali, meteo reale e ora locale di Roma.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='29' fill='%23f3ecdf' stroke='%23974b36' stroke-width='2'/%3E%3Ctext x='32' y='38' text-anchor='middle' font-family='serif' font-size='17' fill='%23974b36'%3ER%3C/text%3E%3C/svg%3E">
+  <title>Roma — La città isometrica vivente</title>
+  <link rel="preload" as="image" href="./map/preview.jpg">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <main id="app" aria-label="Mappa isometrica interattiva di Roma">
+    <section id="map-stage" aria-label="Mappa di Roma. Trascina per spostarti e usa la rotellina per ingrandire.">
+      <img id="map-poster" src="./map/preview.jpg" alt="Veduta isometrica di Roma generata da geometrie OpenStreetMap e Overture Maps">
+      <div id="viewer" role="img" aria-label="Mappa isometrica navigabile di Roma"></div>
+      <div id="daylight" aria-hidden="true"></div>
+      <canvas id="weather-canvas" aria-hidden="true"></canvas>
+      <canvas id="traffic-canvas" aria-label="Traffico urbano simulato in movimento"></canvas>
+    </section>
+
+    <header class="brand panel">
+      <div class="brand-mark" aria-hidden="true">SPQR</div>
+      <div class="brand-copy">
+        <h1>ROMA</h1>
+        <p>La città isometrica vivente</p>
+      </div>
+      <span class="brand-rule" aria-hidden="true"></span>
+      <div class="brand-coordinates">41.9028° N<br>12.4964° E</div>
+    </header>
+
+    <nav class="districts panel" aria-label="Esplora i quartieri">
+      <span class="nav-title">Esplora</span>
+      <button type="button" class="district active" data-view="overview" aria-pressed="true">Roma</button>
+      <button type="button" class="district" data-view="ancient" aria-pressed="false">Antica</button>
+      <button type="button" class="district" data-view="vatican" aria-pressed="false">Vaticano</button>
+      <button type="button" class="district" data-view="termini" aria-pressed="false">Termini</button>
+      <button type="button" class="district" data-view="borghese" aria-pressed="false">Borghese</button>
+    </nav>
+
+    <section class="live-panel panel" aria-label="Ora e meteo attuale a Roma">
+      <button id="weather-button" class="weather-button" type="button" aria-expanded="false" aria-controls="weather-details">
+        <span id="weather-icon" class="weather-icon" aria-hidden="true"></span>
+        <span class="weather-main"><strong id="temperature">—°</strong><span id="weather-label">Meteo in caricamento</span></span>
+        <span id="live-dot" class="live-dot loading" aria-hidden="true"></span>
+      </button>
+      <div class="clock-block">
+        <time id="rome-clock" aria-label="Ora locale di Roma">--:--:--</time>
+        <span id="rome-date">Ora di Roma</span>
+      </div>
+    </section>
+
+    <section id="weather-details" class="weather-details panel" aria-label="Dettagli meteo" hidden>
+      <div class="weather-detail-head"><strong id="weather-summary">Meteo a Roma</strong><span id="weather-status">In attesa</span></div>
+      <dl>
+        <div><dt>Percepita</dt><dd id="feels-like">—</dd></div>
+        <div><dt>Umidità</dt><dd id="humidity">—</dd></div>
+        <div><dt>Vento</dt><dd id="wind">—</dd></div>
+        <div><dt>Copertura</dt><dd id="cloud-cover">—</dd></div>
+      </dl>
+      <p id="weather-updated">Aggiornamento meteo in corso…</p>
+      <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Fonte: Open-Meteo <span aria-hidden="true">↗</span></a>
+    </section>
+
+    <aside class="layers panel" aria-label="Livelli della mappa">
+      <div class="panel-heading"><span>Livelli</span><span id="simulation-state">IN MOVIMENTO</span></div>
+      <button type="button" class="layer-toggle" data-layer="traffic" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16v2m14-2v2M4 11l2-5h12l2 5v5H4v-5Z"/><path d="M6 11h12M7 14h.01M17 14h.01"/></svg>
+        <span>Traffico</span><span class="switch" aria-hidden="true"></span>
+      </button>
+      <button type="button" class="layer-toggle" data-layer="transit" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="15" rx="3"/><path d="M8 18l-2 3m10-3 2 3M8 7h8M8 12h.01M16 12h.01"/></svg>
+        <span>Bus, treni e battelli</span><span class="switch" aria-hidden="true"></span>
+      </button>
+      <button type="button" class="layer-toggle" data-layer="weather" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 15a4 4 0 1 1 1.2-7.8A5.5 5.5 0 0 1 19 10a3 3 0 0 1-1 5.9M8 17l-1 3m5-3-1 4m5-4-1 3"/></svg>
+        <span>Meteo reale</span><span class="switch" aria-hidden="true"></span>
+      </button>
+      <button type="button" class="layer-toggle" data-layer="labels" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-6 7-12A7 7 0 1 0 5 9c0 6 7 12 7 12Z"/><circle cx="12" cy="9" r="2"/></svg>
+        <span>Monumenti</span><span class="switch" aria-hidden="true"></span>
+      </button>
+    </aside>
+
+    <div id="landmark-layer" aria-label="Scorciatoie ai monumenti"></div>
+
+    <section id="landmark-card" class="landmark-card panel" aria-live="polite" hidden>
+      <button id="close-landmark" class="close-button" type="button" aria-label="Chiudi la scheda del monumento">×</button>
+      <p id="landmark-era" class="eyebrow"></p>
+      <h2 id="landmark-name"></h2>
+      <p id="landmark-italian" class="italian"></p>
+      <p id="landmark-description"></p>
+      <button id="focus-landmark" class="text-button" type="button">Avvicina sulla mappa <span aria-hidden="true">↗</span></button>
+    </section>
+
+    <div class="map-tools" aria-label="Controlli mappa">
+      <button id="zoom-in" class="tool-button panel" type="button" aria-label="Ingrandisci" title="Ingrandisci">+</button>
+      <button id="zoom-out" class="tool-button panel" type="button" aria-label="Riduci" title="Riduci">−</button>
+      <button id="home-view" class="tool-button panel home-icon" type="button" aria-label="Mostra tutta Roma" title="Mostra tutta Roma">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8M5 10v10h14V10M9 20v-6h6v6"/></svg>
+      </button>
+    </div>
+
+    <div class="right-actions">
+      <button id="data-button" class="action-button panel" type="button" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+        <span>Dati e fonti</span>
+      </button>
+      <button id="capture-button" class="tool-button panel" type="button" aria-label="Scarica la vista come immagine" title="Scarica la vista">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 13 3h-2L9.5 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-5.5Z"/><circle cx="12" cy="12.5" r="4"/></svg>
+      </button>
+      <button id="fullscreen-button" class="tool-button panel" type="button" aria-label="Attiva schermo intero" title="Schermo intero">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+      </button>
+    </div>
+
+    <section class="playback panel" aria-label="Controlli animazione">
+      <button id="play-button" type="button" aria-label="Metti in pausa la città">
+        <svg id="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
+        <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="m8 5 11 7-11 7V5Z"/></svg>
+      </button>
+      <div><strong id="playback-title">Roma si muove</strong><span id="playback-subtitle">48 auto · 6 bus · 4 treni · 3 battelli</span></div>
+      <button id="speed-button" type="button" aria-label="Cambia velocità della simulazione">1×</button>
+    </section>
+
+    <div class="map-hint panel"><span>Trascina per esplorare</span><i></i><span>Scorri per lo zoom</span><i></i><span>Seleziona un monumento</span></div>
+    <footer class="attribution">Geometrie OSM/HDX e Overture Maps · © OpenStreetMap contributors · Meteo Open-Meteo</footer>
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <div id="loading" role="status" aria-live="polite">
+      <div class="loader-seal" aria-hidden="true">SPQR</div>
+      <p>ROMA</p>
+      <span id="loading-status">Preparo la città illustrata…</span>
+      <div class="loading-track"><span id="loading-progress"></span></div>
+    </div>
+
+    <dialog id="data-dialog" aria-labelledby="data-title">
+      <div class="dialog-head">
+        <div><p class="eyebrow">GEOGRAFIA · ARTE · DATI LIVE</p><h2 id="data-title">Come è costruita questa Roma</h2></div>
+        <button id="close-data" class="close-button" type="button" aria-label="Chiudi dati e fonti">×</button>
+      </div>
+      <p class="dialog-intro">Una mappa isometrica 2D navigabile costruita da geometrie vettoriali reali. Edifici, strade, binari, Tevere, parchi e monumenti derivano da OpenStreetMap tramite HDX/HOT e Overture Maps; il rendering è interpretato per la leggibilità, quindi non sostituisce una carta tecnica o catastale.</p>
+      <div class="source-grid">
+        <article><span>01</span><h3>OpenStreetMap · HDX/HOT</h3><p>35.888 edifici, 947 strade e 62 tratti ferroviari nel centro di Roma, con edifici e strade anche per la Città del Vaticano. Licenza ODbL.</p><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Licenza e autori ↗</a></article>
+        <article><span>02</span><h3>Overture Maps</h3><p>Layer base per verde, copertura del suolo e acqua. Include dati OSM e ESA WorldCover 2021 per la copertura territoriale.</p><a href="https://overturemaps.org/" target="_blank" rel="noreferrer">Overture Maps ↗</a></article>
+        <article><span>03</span><h3>Copernicus · Open-Meteo</h3><p>Sentinel-2 L2A resta come riferimento documentario; temperatura, pioggia, nuvole, vento e giorno/notte arrivano da Open-Meteo e sono aggiornati ogni dieci minuti.</p><a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Documentazione meteo ↗</a></article>
+        <article><span>04</span><h3>Traffico simulato</h3><p>Auto, bus, treni e battelli seguono le stesse geometrie stradali, ferroviarie e fluviali disegnate nella mappa. Non sono posizioni GPS né dati ATAC in tempo reale.</p><button id="open-traffic-info" type="button">Mostra il traffico sulla mappa ↗</button></article>
+      </div>
+      <div class="method-note"><strong>Tecnica.</strong> Piramide di tile JPEG + OpenSeadragon per lo zoom, Canvas 2D per traffico e atmosfera, HTML per i controlli. Architettura ispirata a <a href="https://github.com/krasun/isometricworld" target="_blank" rel="noreferrer">Isometric World</a>, con codice e illustrazione realizzati per questa Roma.</div>
+      <figure class="sentinel-figure"><img src="./data/sentinel-rome.jpg" alt="Anteprima satellitare Sentinel-2 di Roma del 12 agosto 2024" loading="lazy" onerror="this.closest('figure').hidden=true"><figcaption>Sentinel-2 L2A · acquisizione 12 agosto 2024</figcaption></figure>
+    </dialog>
+  </main>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
