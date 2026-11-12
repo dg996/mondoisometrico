@@ -28,7 +28,7 @@ test('sparse segments and steep height jumps fail closed', () => {
 for (const bus of [false, true]) test(`${bus ? 'bus' : 'car'} polygons all stay at road altitude`, () => {
   const t = traffic() as any;
   assert.ok(t.vehicles.length > 0);
-  t.vehicles = [{...t.vehicles[0], s: 50, dir: 1, len: bus ? 13.5 : 6, hei: bus ? 3.2 : 1.65, bus}];
+  t.vehicles = [{...t.vehicles[0], off: false, w: 0, s: 50, dir: 1, len: bus ? 13.5 : 6, hei: bus ? 3.2 : 1.65, bus}];
   const ys: number[] = [];
   const ctx = new Proxy({}, {get: (_, k) => k === 'moveTo' || k === 'lineTo' ? (_x: number,y: number) => ys.push(y) : () => {}, set: () => true});
   t.draw(ctx, (x: number,y: number) => [x,y], 1, [-1000,-1000,1000,1000]);

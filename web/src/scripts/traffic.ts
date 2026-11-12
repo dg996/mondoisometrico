@@ -40,6 +40,8 @@ interface Vehicle {
   /** index into Traffic.guides when this bus runs a real line, else -1 */
   line: number;
   kind?: "car" | "small" | "taxi" | "van";
+  /** out of the drawn graph, waiting for a free entry (not drawn, not in any lane) */
+  off?: boolean;
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -76,6 +78,10 @@ export class Traffic {
   private lanes = new Map<string, Vehicle[]>(); // `${way}:${dir}:${lane}` -> sorted by s
   /** junction box radius per node: half the widest road meeting there + margin */
   private nodeR = new Map<number, number>();
+  /** node -> junction cluster id: nodes of one real crossing (Piazza Venezia has dozens) share one box */
+  private grp = new Map<number, number>();
+  /** clusters that contain a real junction (degree > 2): entering them needs a green */
+  private ctl = new Set<number>();
   private t = 0;
   private rand = mulberry(7);
   /** vehicles drawn in the last frame (debug / tests) */
@@ -103,6 +109,7 @@ export class Traffic {
       if (r.o <= 0) this.link(r.b, { w, dir: -1 });
     }
     for (const [n, d] of this.degree) if (d <= 2) this.nodeR.set(n, 0); // not a junction: no box, no stop line
+    this.clusterJunctions();
     // "not too many": ~1 vehicle per 55 weighted metres (only on-screen ones are drawn)
     const weights = this.ways.map((w) => w.len * CLASS_WEIGHT[w.r.c]);
     const total = weights.reduce((a, b) => a + b, 0);
@@ -139,6 +146,9 @@ export class Traffic {
       this.lanes.set(`${w}:${dir}:${lane}`, group);
     }
     if (lines.length) { this.spawnLines(lines); this.regroup(); }
+    // settle for 40 simulated seconds: spawned vehicles sort out queues and junctions before the
+    // first frame, so nobody sees the initial placement shuffle
+    for (let i = 0; i < 400; i++) this.step(0.1);
   }
 
   get count() { return this.vehicles.length; }
@@ -171,10 +181,10 @@ export class Traffic {
   }
 
   /** A way + direction lying on the guide around fraction `f` of its length (or anywhere on it). */
-  private placeOnLine(g: number, f: number, existing?: Vehicle) {
+  private placeOnLine(g: number, f: number, existing?: Vehicle, step = 0.137) {
     const guide = this.guides[g], n = guide.xy.length / 2;
-    for (let tries = 0; tries < 30; tries++) {
-      const at = Math.min(n - 2, Math.floor(((f + tries * 0.137) % 1) * (n - 1)));
+    for (let tries = 0, max = step < 0.1 ? Math.ceil(1 / step) : 30; tries < max; tries++) {
+      const at = Math.min(n - 2, Math.floor(((f + tries * step) % 1) * (n - 1)));
       const x = guide.xy[at * 2], y = guide.xy[at * 2 + 1], fx = guide.xy[at * 2 + 2] - x, fy = guide.xy[at * 2 + 3] - y;
       // the drawn way closest to this guide point, travelled in the line's direction
       let pick: { w: number; dir: 1 | -1; s: number } | null = null, pd = 8;
@@ -205,9 +215,11 @@ export class Traffic {
       if (way.len < len + 4 || !this.sampleVisible(way, s, pick.dir, len)) continue;
       const lane = 0, group = this.lanes.get(`${pick.w}:${pick.dir}:${lane}`) ?? [];
       if (group.some((o) => o !== existing && Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
+      if (!this.spotFree(pick.w, pick.dir, s, len, existing)) continue;
       if (existing) {
         this.release(existing);
-        Object.assign(existing, { w: pick.w, dir: pick.dir, s, v: 0, next: null, stuck: 0, through: false });
+        Object.assign(existing, { w: pick.w, dir: pick.dir, s, lane, v: 0, next: null, stuck: 0, through: false, off: false });
+        this.insertLane(existing); // later moves in this same step must see it
         return true;
       }
       const v: Vehicle = {
@@ -223,6 +235,13 @@ export class Traffic {
     return false;
   }
 
+  /** A line bus that left the drawn graph comes back where its route first enters it (the edge of
+   *  the painted area, like the next bus of the line arriving), never popping up mid-route. */
+  private reenterLine(v: Vehicle) {
+    this.release(v);
+    v.off = !this.placeOnLine(v.line, 0, v, 0.01) && !this.placeOnLine(v.line, this.rand(), v);
+  }
+
   /** Does this line run at the simulated hour? Night lines (n…) 0:30–5:30, the others 5:30–24:30. */
   private lineRuns(g: number) {
     const m = this.clock(), night = m >= 30 && m < 330;
@@ -234,9 +253,37 @@ export class Traffic {
     this.out.get(node)!.push(e);
   }
 
+  /** ENU point at distance `dist` along a way in travel direction `dir` (lane offset ignored). */
+  private pointAt(w: number, dir: 1 | -1, dist: number): [number, number] {
+    const way = this.ways[w], S = way.r.s, s = Math.max(0, Math.min(way.len, dir === 1 ? dist : way.len - dist));
+    let i = 1;
+    while (i < way.n - 1 && way.cum[i] < s) i++;
+    const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
+    return [S[i * 4 - 4] + (S[i * 4] - S[i * 4 - 4]) * f, S[i * 4 - 3] + (S[i * 4 + 1] - S[i * 4 - 3]) * f];
+  }
+
+  /** No other vehicle, on any way, within reach of a body of length `len` centred there (placing
+   *  a vehicle must not drop it onto one queued just across a node). */
+  private spotFree(w: number, dir: 1 | -1, s: number, len: number, self?: Vehicle) {
+    const [x, y] = this.pointAt(w, dir, s), u = this.ways[w].r.s[2];
+    for (const o of this.vehicles) {
+      if (o === self || o.off) continue;
+      const [ox, oy] = this.pointAt(o.w, o.dir, o.s);
+      if (Math.hypot(ox - x, oy - y) < (o.len + len) / 2 + 2 * GAP && Math.abs(this.ways[o.w].r.s[2] - u) < 6) return false;
+    }
+    return true;
+  }
+
+  /** Put a moved vehicle into its new lane list now (lists are rebuilt only once per step). */
+  private insertLane(v: Vehicle) {
+    const k = `${v.w}:${v.dir}:${v.lane}`, g = this.lanes.get(k) ?? this.lanes.set(k, []).get(k)!;
+    if (!g.includes(v)) { g.push(v); g.sort((a, b) => a.s - b.s); }
+  }
+
   private regroup() {
     this.lanes.clear();
     for (const v of this.vehicles) {
+      if (v.off) continue;
       const k = `${v.w}:${v.dir}:${v.lane}`;
       const g = this.lanes.get(k);
       if (g) g.push(v); else this.lanes.set(k, [v]);
@@ -316,6 +363,41 @@ export class Traffic {
   }
 
   private isJunction(node: number) { return (this.degree.get(node) ?? 0) > 2; }
+  private groupOf(node: number) { return this.grp.get(node) ?? node; }
+  /** the end of the way lies in a controlled crossing (a junction or a node joined to one) */
+  private controlled(node: number) { return this.ctl.has(this.groupOf(node)); }
+
+  /**
+   * Junction nodes whose boxes touch (closer than both radii + 8 m) form one crossing, and short
+   * links' plain nodes near a junction join it: one green for the whole crossing, so vehicles from
+   * two "different" junctions of the same square never meet inside it.
+   */
+  private clusterJunctions() {
+    const pos = new Map<number, [number, number]>();
+    for (const w of this.ways) {
+      const S = w.r.s, k = (w.n - 1) * 4;
+      pos.set(w.r.a, [S[0], S[1]]); pos.set(w.r.b, [S[k], S[k + 1]]);
+    }
+    const parent = new Map<number, number>();
+    const find = (a: number): number => { let r = a; while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!; parent.set(a, r); return r; };
+    const unite = (a: number, b: number) => { const x = find(a), y = find(b); if (x !== y) parent.set(Math.max(x, y), Math.min(x, y)); };
+    const CELL = 40, grid = new Map<string, number[]>();
+    for (const [n, [x, y]] of pos) { const c = `${Math.floor(x / CELL)}_${Math.floor(y / CELL)}`; (grid.get(c) ?? grid.set(c, []).get(c)!).push(n); }
+    for (const [n, [x, y]] of pos) {
+      if (!this.isJunction(n)) continue;
+      const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const m of grid.get(`${cx + i}_${cy + j}`) ?? []) {
+        if (m === n) continue;
+        const [mx, my] = pos.get(m)!, d = Math.hypot(mx - x, my - y);
+        if (d < Math.min(36, (this.nodeR.get(n) ?? 0) + (this.nodeR.get(m) ?? 0) + 8)) unite(n, m);
+      }
+    }
+    for (const n of pos.keys()) {
+      const g = find(n);
+      if (g !== n) this.grp.set(n, g);
+      if (this.isJunction(n)) this.ctl.add(g);
+    }
+  }
 
   /**
    * May the vehicle enter the junction ahead now? Vehicles from the same approach go together
@@ -323,13 +405,14 @@ export class Traffic {
    */
   private grant(v: Vehicle) {
     if (!v.next || !this.entryClear(v, v.next)) return false;
-    const node = this.endNode(v);
-    if (!this.isJunction(node)) { v.through = true; return true; }
+    const node = this.groupOf(this.endNode(v));
+    if (!this.ctl.has(node) || v.holding === node) { v.through = true; return true; } // plain node, or already inside this crossing
     let hold = this.nodeHold.get(node);
     if (hold && hold.inside <= 0 && this.t - hold.last > 0.8) { this.nodeHold.delete(node); hold = undefined; }
     if (hold && this.t - hold.last > 10) { this.nodeHold.delete(node); hold = undefined; } // lost vehicle: reset
     if (hold && (hold.way !== v.w || this.t - hold.start > 12)) return false;
     if (!hold) { hold = { way: v.w, inside: 0, start: this.t, last: this.t }; this.nodeHold.set(node, hold); }
+    if (v.holding >= 0 && v.holding !== node) this.release(v); // straight from one crossing into the next
     hold.inside++; hold.last = this.t;
     v.through = true; v.holding = node;
     return true;
@@ -342,32 +425,84 @@ export class Traffic {
     v.holding = -1;
   }
 
+  /** Vehicles whose nose (1 m ahead of the front) would touch another body: a hairpin, two exits
+   *  diverging, a crossing the lane logic does not see. Checked only near way ends (cheap). */
+  private blockedAhead() {
+    const CELL = 20, grid = new Map<string, Array<{ v: Vehicle; a: [number, number]; b: [number, number] }>>();
+    for (const v of this.vehicles) {
+      if (v.off) continue;
+      const a = this.pointAt(v.w, v.dir, v.s - v.len / 2), b = this.pointAt(v.w, v.dir, v.s + v.len / 2);
+      const k = `${Math.floor((a[0] + b[0]) / 2 / CELL)}_${Math.floor((a[1] + b[1]) / 2 / CELL)}`;
+      (grid.get(k) ?? grid.set(k, []).get(k)!).push({ v, a, b });
+    }
+    const out = new Set<Vehicle>();
+    for (const [k, list] of grid) {
+      const [cx, cy] = k.split("_").map(Number);
+      for (const me of list) {
+        const v = me.v;
+        if (this.ways[v.w].len - (v.s + v.len / 2) > 20 && v.s - v.len / 2 > 20) continue; // mid-way: lanes handle it
+        const dx = me.b[0] - me.a[0], dy = me.b[1] - me.a[1], L = Math.hypot(dx, dy) || 1;
+        const F: [number, number] = [me.b[0] + (dx / L) * 1.2, me.b[1] + (dy / L) * 1.2];
+        for (let i = -1; i <= 1 && !out.has(v); i++) for (let j = -1; j <= 1; j++) for (const o of grid.get(`${cx + i}_${cy + j}`) ?? []) {
+          if (o.v === v || Math.abs(this.ways[o.v.w].r.s[2] - this.ways[v.w].r.s[2]) > 6) continue;
+          const ox = o.b[0] - o.a[0], oy = o.b[1] - o.a[1], OL = Math.hypot(ox, oy) || 1;
+          if ((ox * dx + oy * dy) / (OL * L) < -0.5) continue; // oncoming: passes alongside
+          // the other body must be ahead of me, and my nose within reach of it
+          const mx = (o.a[0] + o.b[0]) / 2 - (me.a[0] + me.b[0]) / 2, my = (o.a[1] + o.b[1]) / 2 - (me.a[1] + me.b[1]) / 2;
+          if (mx * dx + my * dy <= 0) continue;
+          const t = Math.max(0, Math.min(1, ((F[0] - o.a[0]) * ox + (F[1] - o.a[1]) * oy) / (OL * OL)));
+          const d = Math.hypot(F[0] - o.a[0] - ox * t, F[1] - o.a[1] - oy * t);
+          if (d < (v.wid + o.v.wid) / 2 + 0.3) { out.add(v); break; }
+        }
+      }
+    }
+    return out;
+  }
+
   step(dt: number) {
     dt = Math.min(dt, 0.1);
     this.t += dt;
     this.regroup();
+    const blocked = this.blockedAhead();
     for (const g of this.lanes.values()) {
       for (let k = 0; k < g.length; k++) {
         const v = g[k], way = this.ways[v.w];
         if (v.next === null) v.next = this.chooseNext(v);
         let target = this.limit(v);
-        if (v.stuck > 55) { if (v.line >= 0) this.placeOnLine(v.line, this.rand(), v); else this.respawn(v); continue; } // gridlock escape
+        if (v.stuck > 55) { if (v.line >= 0) this.reenterLine(v); else this.respawn(v); continue; } // gridlock escape
         // car following: stay a safe gap behind the vehicle ahead in this lane
         const lead = g[k + 1];
         if (lead) {
           const gap = lead.s - lead.len / 2 - (v.s + v.len / 2) - GAP;
           target = Math.min(target, Math.max(0, gap / HEADWAY), lead.v + Math.max(0, gap) * 0.5);
+        } else if (v.next) {
+          // last in its lane: follow the last vehicle already on the next way (no lane change there)
+          const nl = v.bus ? 0 : Math.min(v.lane, this.ways[v.next.w].r.l - 1), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
+          if (first) {
+            const path = way.len - (v.s + v.len / 2) + first.s - first.len / 2 - GAP - 0.25 * Math.max(v.len, first.len); // ways meet at an angle: straight bodies need room
+            // and through a hairpin the two bodies end up side by side: keep a straight-line gap too
+            const [fx, fy] = this.pointAt(v.w, v.dir, v.s + v.len / 2), [rx, ry] = this.pointAt(first.w, first.dir, first.s - first.len / 2);
+            const gap = Math.min(path, Math.hypot(fx - rx, fy - ry) - GAP - (v.wid + first.wid) / 2);
+            target = Math.min(target, Math.max(0, gap / HEADWAY), first.v + Math.max(0, gap) * 0.5);
+            if (gap < 0.3) target = 0;
+          }
         }
         // approaching the junction: slow for the turn; at the stop line wait until it's granted
         const toStop = this.toStop(v);
         if (!v.through && v.next && toStop < 30) {
-          const go = (toStop < 2 || !this.isJunction(this.endNode(v))) && this.grant(v);
+          const ctl = this.controlled(this.endNode(v)) && v.holding !== this.groupOf(this.endNode(v));
+          const go = (toStop < 2 || !ctl) && this.grant(v);
           if (!go) target = Math.min(target, Math.max(0, toStop - 0.3) / HEADWAY);
           if (!go && toStop < 2 && v.v < 0.5) v.stuck += dt; else if (go) v.stuck = 0;
           if (way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 5 + Math.max(0, toStop) * 0.3);
         } else if (v.through && way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 7);
-        // left the junction box behind: release it
-        if (v.holding >= 0 && v.holding !== this.endNode(v) && v.s - v.len / 2 > (this.nodeR.get(v.holding) ?? 0)) this.release(v);
+        if (blocked.has(v)) target = 0;
+        // left the crossing behind (this way leads out of it and the rear has cleared the box): release it
+        if (v.holding >= 0) {
+          const start = v.dir === 1 ? way.r.a : way.r.b;
+          if (this.groupOf(this.endNode(v)) !== v.holding && (this.groupOf(start) !== v.holding || v.s - v.len / 2 > (this.nodeR.get(start) ?? 0))) this.release(v);
+          else { const h = this.nodeHold.get(v.holding); if (h) h.last = this.t; } // still inside: keep the crossing held
+        }
         // accelerate gently, brake firmly; never overrun the stop point
         v.v = target > v.v ? Math.min(target, v.v + ACCEL * dt) : Math.max(target, v.v - BRAKE * dt);
         if (lead) v.v = Math.min(v.v, Math.max(0, (lead.s - lead.len / 2 - (v.s + v.len / 2) - 0.5) / dt));
@@ -376,39 +511,60 @@ export class Traffic {
     }
     // move vehicles that have driven past the end of their way onto the next one
     for (const v of this.vehicles) {
+      if (v.off) { if (this.rand() < dt) { if (v.line >= 0) this.reenterLine(v); else this.respawn(v); } continue; } // about once a second
       let way = this.ways[v.w];
       if (v.s + v.len / 2 < way.len) continue;
       if (!v.next) { // dead end (or a line bus at the end of its drawn route)
-        if (v.line >= 0) this.placeOnLine(v.line, this.rand(), v);
-        else if (way.r.o === 0) { v.dir = v.dir === 1 ? -1 : 1; v.s = v.len / 2; v.through = false; }
-        else this.respawn(v);
+        if (v.line >= 0) this.reenterLine(v);
+        else this.respawn(v); // drove out of the drawn graph: comes back in at a free edge entry
         continue;
       }
       if (!v.through) { v.s = way.len - v.len / 2; v.v = 0; continue; } // not granted: hold at the end
-      const over = v.s + v.len / 2 - way.len;
+      const over = v.s + v.len / 2 - way.len, nw = this.ways[v.next.w];
+      const lane = v.bus ? 0 : Math.min(v.lane, nw.r.l - 1), ns = Math.min(nw.len - v.len / 2, v.len / 2 + over);
+      // something was put at the start of that lane during this step: wait at the line instead
+      if ((this.lanes.get(`${v.next.w}:${v.next.dir}:${lane}`) ?? []).some((o) => o !== v && Math.abs(o.s - ns) < (o.len + v.len) / 2 + 0.5)) {
+        v.s = way.len - v.len / 2; v.v = 0; continue;
+      }
       v.w = v.next.w; v.dir = v.next.dir; v.next = null; v.through = false;
-      way = this.ways[v.w];
-      v.lane = v.bus ? 0 : Math.min(v.lane, way.r.l - 1);
-      v.s = Math.min(way.len - v.len / 2, v.len / 2 + over);
+      way = nw;
+      v.lane = lane;
+      v.s = ns;
       v.phase += 0.7;
+      this.insertLane(v);
     }
   }
 
-  /** Move a vehicle stranded at a one-way dead end (data gap) to a random free road start. */
+  /** Way starts at the edge of the drawn graph (painted-area cut, occlusion, dead end): where a
+   *  vehicle can appear as if it had driven in from outside, never popping up mid-street. */
+  private entries: Array<{ w: number; dir: 1 | -1 }> | null = null;
+
+  /** Move a vehicle that drove out of the graph (dead end, cut) to a free entry at its edge. */
   private respawn(v: Vehicle) {
     this.release(v);
-    for (let tries = 0; tries < 40; tries++) {
-      const w = Math.floor(this.rand() * this.ways.length), way = this.ways[w];
-      const dir: 1 | -1 = way.r.o === -1 ? -1 : way.r.o === 1 ? 1 : this.rand() < 0.5 ? 1 : -1;
+    if (!this.entries) {
+      this.entries = [];
+      this.ways.forEach((way, w) => {
+        if (way.r.o >= 0 && (this.degree.get(way.r.a) ?? 0) === 1) this.entries!.push({ w, dir: 1 });
+        if (way.r.o <= 0 && (this.degree.get(way.r.b) ?? 0) === 1) this.entries!.push({ w, dir: -1 });
+      });
+    }
+    for (let tries = 0; tries < 60; tries++) {
+      const edge = this.entries.length && tries < 40 ? this.entries[Math.floor(this.rand() * this.entries.length)] : null;
+      const w = edge ? edge.w : Math.floor(this.rand() * this.ways.length), way = this.ways[w];
+      const dir: 1 | -1 = edge ? edge.dir : way.r.o === -1 ? -1 : way.r.o === 1 ? 1 : this.rand() < 0.5 ? 1 : -1;
       const start = (this.nodeR.get(dir === 1 ? way.r.a : way.r.b) ?? 4) + v.len / 2;
       if (way.r.c > 3 || way.len < start + v.len + 30 || (v.bus && way.r.c > 2)) continue;
       if (this.wayVisible(way) < 0.55) continue; // no river / occluded respawns
       if (!this.sampleVisible(way, start, dir, v.len)) continue;
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
-      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false });
+      if (!this.spotFree(w, dir, start, v.len, v)) continue;
+      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false });
+      this.insertLane(v);
       return;
     }
+    v.off = true; // no free entry now: wait out of sight and try again
   }
 
   /** Lateral offset (m, + = right of travel) of the lane centre, kept inside the drawn asphalt. */
@@ -437,7 +593,7 @@ export class Traffic {
         while (i < way.n - 1 && way.cum[i] < s) i++;
         return { i, s };
       };
-      if (v.line >= 0 && !this.lineRuns(v.line)) continue; // night lines by night, day lines by day
+      if (v.off || (v.line >= 0 && !this.lineRuns(v.line))) continue; // night lines by night, day lines by day
       if (!this.sampleVisible(way, v.s, v.dir, v.len)) continue;
       const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
       const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
