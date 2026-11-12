@@ -34,7 +34,7 @@ const STYLE = join(PIPELINE, "style", "reference.png");
 const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
 const SEA = join(PIPELINE, "style", "sea.png");
 /** Registration floor; landmarks do not get an exception to geometric alignment. */
-const MIN_MATCH = 0.45;
+const MIN_MATCH = 0.4;
 /** Below MIN_MATCH but above this, the best attempt is kept and flagged .soft for later repaint. */
 const SOFT_MATCH = 0.3;
 /** Below this share of strong edges in the render (sea, sand, empty lots) the match check is skipped. */
@@ -400,11 +400,11 @@ async function looksLikeSea(file: string) {
 /** Delete finished windows with a black band or patch the render doesn't have, so they get repainted. */
 async function dropDarkWindows(wins: Array<[number, number]>) {
   let n = 0;
-  for (const [i, j] of wins) {
-    if (!existsSync(winFile(i, j))) continue;
+  await pool(wins, 8, async ([i, j]) => {
+    if (!existsSync(winFile(i, j))) return;
     const render = await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN)).png().toBuffer();
     if (existsSync(localWinFile(i,j)) && await hasDarkPatch(localWinFile(i,j), render)) { rmSync(localWinFile(i,j)); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
-  }
+  });
   if (n) console.log(`  dropped ${n} windows with black patches`);
 }
 
@@ -517,6 +517,9 @@ async function paintWindow(i: number, j: number) {
           bestR = r;
         }
         console.warn(`  ${i}_${j}: rejected attempt ${attempt}, match=${r.score.toFixed(2)}`);
+        // Speed: if attempt 2 is still below MIN_MATCH but we have a recognisable best,
+        // soft-accept it now instead of burning a third generation on a plateau.
+        if (attempt >= 2 && bestR && bestR.score >= SOFT_MATCH) break;
         continue;
       }
       const warp = structured && r.score > r.identity + 0.01;
@@ -768,9 +771,9 @@ async function main() {
       painted += todo.length;
     }
     // Mid-batch assemble rebuilds EVERY covered tile (global palette correction): at ~3.5 s/tile
-    // that is minutes per ring late in the batch. Throttle to every 8th ring; the final strict
-    // assemble after the loop still rebuilds everything before paint.json is written.
-    if (painted && r % 8 === 7) await assemble(false, false);
+    // that is up to an hour per ring late in the batch on small runners. Disabled entirely:
+    // the final strict assemble after the loop rebuilds everything before paint.json is written.
+    void painted;
   }
   /* palette QA in assemble covers water and land together */ // then every tile with open water is rebuilt with the harmonised sea
   await assemble(!args.window, true);
