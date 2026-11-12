@@ -17,6 +17,7 @@ export interface Road {
 }
 
 type Vec3 = [number, number, number];
+import { drawCar } from "./vehicle-mesh.ts";
 
 /** A real bus line stretch (GTFS, CC BY-SA): ENU guide path every ~10 m and headway in seconds. */
 export interface BusLine { n: string; d: number; h: number; p: number[] }
@@ -504,7 +505,7 @@ export class Traffic {
     fill(foot(1.08, G).map((p) => [p[0] + 0.45, p[1] + 0.3, p[2]] as Vec3), "#000", 0.2);
     // tyres first (the body covers their top half), and only on the side facing the camera
     const visibleSide = facing(pt(-hl, hw, 0), pt(hl, hw, 0)) ? 1 : -1;
-    this.wheels(ctx, scr, pt, v, px, (kind === "bus" ? hl * 0.72 : hl * 0.62), hw * visibleSide);
+    if (px < 2.2) this.wheels(ctx, scr, pt, v, px, (kind === "bus" ? hl * 0.72 : hl * 0.62), hw * visibleSide); // car models draw their own
 
     const prism = (bottom: Vec3[], top: Vec3[], rgb: [number, number, number]) => {
       for (let i = 0; i < bottom.length; i++) {
@@ -528,8 +529,13 @@ export class Traffic {
     };
     const glass = "rgb(38,52,66)";
 
+    if (kind === "bus" && px >= 2.2) {
+      const view: Vec3 = [this.camFwd[0] * Math.SQRT1_2, this.camFwd[1] * Math.SQRT1_2, -Math.SQRT1_2];
+      drawCar(ctx, scr, c, d, "bus", v.len, v.wid, v.hei, v.color, view, SUN, px);
+      return;
+    }
     if (kind === "bus") {
-      // ATAC bus: red body, continuous black window band, light roof with AC pod, big windscreen
+      // far away: simple ATAC block (red body, window band, light roof), continuous black window band, light roof with AC pod, big windscreen
       const z0 = G + 0.32, zWin0 = G + 1.15, zWin1 = v.hei - 0.35, zTop = v.hei;
       const bot = foot(1, z0), top = foot(1, zTop);
       outline([...foot(1, G), ...top]);
@@ -555,7 +561,13 @@ export class Traffic {
       return;
     }
 
-    // cars, taxis, vans: lower body + glasshouse (vans: tall box with a short bonnet)
+    // cars, taxis, vans: lofted 3D models (vehicle-mesh.ts)
+    if (px >= 2.2) {
+      const view: Vec3 = [this.camFwd[0] * Math.SQRT1_2, this.camFwd[1] * Math.SQRT1_2, -Math.SQRT1_2];
+      drawCar(ctx, scr, c, d, kind ?? "car", v.len, v.wid, v.hei, v.color, view, SUN, px, kind === "taxi");
+      return;
+    }
+    // far away: one lit block with a darker cabin
     const van = kind === "van";
     const zSill = G + 0.28, zBelt = G + v.hei * (van ? 0.45 : 0.55), zRoof = G + v.hei;
     const nose = hl, tail = -hl;
