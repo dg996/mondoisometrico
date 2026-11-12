@@ -35,9 +35,10 @@ export class Trams {
   private zones: Array<{ on: Map<number, [number, number]>; holder: number }> = [];
 
   constructor(tracks: Road[], private meta: TramMeta[], private enu2px: number[][], private camFwd: [number, number], stops: Array<Array<[number, number]>> = []) {
-    for (const r of tracks) {
-      const n = r.s.length / 4;
+    for (const r0 of tracks) {
+      const n = r0.s.length / 4;
       if (n < 2) continue;
+      const r = r0; // each direction already sits on its own OSM rail (export snapToRails)
       const cum = new Float32Array(n);
       for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(r.s[i * 4] - r.s[i * 4 - 4], r.s[i * 4 + 1] - r.s[i * 4 - 3]);
       const line = (r as Road & { t?: number }).t ?? 0;
@@ -54,7 +55,8 @@ export class Trams {
       this.stops[t] = here.sort((a, b) => a - b);
       const spacing = Math.max(260, meta[line].h * SPEED);
       const count = Math.max(1, Math.round(cum[n - 1] / spacing));
-      for (let k = 0; k < count; k++) this.trams.push({ id: this.trams.length, t, s: (k / count) * cum[n - 1], v: SPEED * 0.6, dwell: 0, lastStop: -1 });
+      const phase = (t * 0.618034) % 1; // stretches do not all start with a tram at their entry
+      for (let k = 0; k < count; k++) this.trams.push({ id: this.trams.length, t, s: ((k + phase) / count) * cum[n - 1], v: SPEED * 0.6, dwell: 0, lastStop: -1 });
     }
     this.findZones();
   }

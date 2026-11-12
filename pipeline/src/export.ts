@@ -37,6 +37,7 @@ import { artCoverage, renderedCoverage, paintedBounds, parseArtBounds } from "./
 import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { landmarkProjector } from "./landmark-anchors.ts";
+import { railIndex, snapToRails } from "./transit-snap.ts";
 import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
 import { fetchGtfs, readTransit } from "./transit.ts";
 import { cloudEdge } from "./clouds.ts";
@@ -421,7 +422,7 @@ async function exportTransit(areas: string[], heights: Heights) {
     const features = readJson<Array<{ id?: number; bridge?: boolean; l?: Point[]; k: string; r?: Point[][] }>>(join(dir, "features.json"));
     const water = features.filter((f) => ["water", "sea", "pool"].includes(f.k) && f.r).map((f) => f.r!);
     return { meta, terrain: new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)), water,
-      bridges: features.filter((f) => f.bridge && f.l).map((f) => f.l!) };
+      bridges: features.filter((f) => f.bridge && f.l).map((f) => f.l!), rails: features.filter((f) => f.k === "rail" && f.l).map((f) => f.l!) };
   });
   const ground = (x: number, y: number) => { for (const g of grids) { const z = groundAt(g.meta, g.terrain, x, y); if (z !== null) return z; } return null; };
   const wet = (x: number, y: number) => grids.some((g) => inWater(x, y, g.water));
@@ -429,6 +430,8 @@ async function exportTransit(areas: string[], heights: Heights) {
   const painted = (e: number, n: number) => { const z = ground(e, n) ?? 60, [x, y] = enuToPixel([e, n, z]); return paintedArt.has(key(Math.floor(x / CAMERA.tile), Math.floor(y / CAMERA.tile))); };
   const toEnu = (lon: number, lat: number): [number, number] => { const p = ecefToEnu(llhToEcef(lat, lon, 0)); return [p[0], p[1]]; };
   const lines = await readTransit(feed, toEnu, painted);
+  const rails = railIndex(grids.flatMap((g) => g.rails));
+  const snapStats = { on: 0, all: 0 };
   const trams: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }> = [];
   const tramMeta: Array<{ n: string; d: number; h: number; st: number[] }> = [];
   let tramNode = -1;
@@ -444,7 +447,9 @@ async function exportTransit(areas: string[], heights: Heights) {
       for (let d = carry; d < L; d += 2) pts.push([ax + (bx - ax) * d / L, ay + (by - ay) * d / L]);
       carry = (2 - ((L - carry) % 2)) % 2;
     }
-    for (const [e, n] of pts) {
+    const snapped = snapToRails(pts, rails);
+    snapStats.on += snapped.on; snapStats.all += pts.length;
+    for (const [e, n] of snapped.pts) {
       {
         let z = ground(e, n), vis = z !== null ? 1 : 0;
         if (z !== null && wet(e, n)) { // on the water only on a mapped bridge deck
@@ -478,7 +483,7 @@ async function exportTransit(areas: string[], heights: Heights) {
     }
   }
   writeData("transit", JSON.stringify({ licence: "CC BY-SA, Roma Servizi per la Mobilità (GTFS)", buses, trams: { meta: tramMeta, tracks: encodeRoads(trams) } }));
-  console.log(`  transit: ${buses.length} bus line-directions, ${tramMeta.length} tram line-directions through the painted area`);
+  console.log(`  transit: ${buses.length} bus line-directions, ${tramMeta.length} tram line-directions through the painted area, ${((snapStats.on / Math.max(1, snapStats.all)) * 100).toFixed(0)}% of tram samples on an OSM rail`);
 }
 
 /**
