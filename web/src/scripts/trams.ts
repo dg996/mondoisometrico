@@ -5,6 +5,10 @@
  * ~11 m cars that follow the curve of the track. Illustrative positions, real lines and frequencies.
  */
 import type { Road } from "./traffic.ts";
+import { drawCar } from "./vehicle-mesh.ts";
+
+/** the render's sun (page/renderer.ts SUN), normalised, as for the cars */
+const SUN: Vec3 = (() => { const v = [-0.55, -0.35, 0.76], L = Math.hypot(...v); return v.map((x) => x / L) as Vec3; })();
 
 type Vec3 = [number, number, number];
 export interface TramMeta { n: string; d: number; h: number }
@@ -12,7 +16,7 @@ interface Track { r: Road; n: number; cum: Float32Array; len: number; line: numb
 interface Tram { t: number; s: number; v: number }
 
 const SPEED = 6.5, CAR = 11.2, GAP_CARS = 0.35, CARS = 3, WIDTH = 2.4, HEIGHT = 3.4;
-const BODY: [number, number, number] = [232, 230, 224], BAND: [number, number, number] = [196, 46, 40];
+const BODY: [number, number, number] = [228, 226, 220];
 
 export class Trams {
   private tracks: Track[] = [];
@@ -82,8 +86,10 @@ export class Trams {
     items.sort((a, b) => b.depth - a.depth);
     this.drawn = items.length;
     for (const it of items) {
-      for (const car of [...it.cars].sort((a, b) => (b.c[0] * this.camFwd[0] + b.c[1] * this.camFwd[1]) - (a.c[0] * this.camFwd[0] + a.c[1] * this.camFwd[1])))
-        this.car(ctx, proj, car.c, car.d);
+      // cars[0] leads: windscreen only at the front of the first car and the back of the last
+      const ends = it.cars.map((_, k) => (k === 0 ? 2 : 0) | (k === it.cars.length - 1 ? 1 : 0));
+      for (const k of it.cars.map((_, k) => k).sort((a, b) => (it.cars[b].c[0] * this.camFwd[0] + it.cars[b].c[1] * this.camFwd[1]) - (it.cars[a].c[0] * this.camFwd[0] + it.cars[a].c[1] * this.camFwd[1])))
+        this.car(ctx, proj, it.cars[k].c, it.cars[k].d, ends[k]);
       if (px >= 1.1) {
         const [sx, sy] = proj([it.cars[0].c[0], it.cars[0].c[1], it.cars[0].c[2] + HEIGHT + 0.4]);
         const label = this.meta[it.line].n;
@@ -96,27 +102,16 @@ export class Trams {
     }
   }
 
-  /** one tram car: shadow, camera-facing sides (red band low, windows high), light roof */
-  private car(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number]) {
+  /** one tram car as a lofted model (vehicle-mesh.ts): light body, window band, pillars and doors */
+  private car(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number], ends = 0) {
+    const view: Vec3 = [this.camFwd[0] * Math.SQRT1_2, this.camFwd[1] * Math.SQRT1_2, -Math.SQRT1_2];
+    const [ax, ay] = proj(c), [bx, by] = proj([c[0] + d[0], c[1] + d[1], c[2]]), pxPerM = Math.hypot(bx - ax, by - ay);
+    // soft contact shadow
     const r: [number, number] = [d[1], -d[0]], hl = CAR / 2, hw = WIDTH / 2;
-    const pt = (a: number, b: number, z: number): Vec3 => [c[0] + d[0] * a + r[0] * b, c[1] + d[1] * a + r[1] * b, c[2] + z];
-    const poly = (pts: Vec3[]) => { ctx.beginPath(); pts.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.fill(); };
-    const fill = (rgb: [number, number, number], k: number, a = 1) => { ctx.globalAlpha = a; ctx.fillStyle = `rgb(${Math.min(255, rgb[0] * k) | 0},${Math.min(255, rgb[1] * k) | 0},${Math.min(255, rgb[2] * k) | 0})`; };
-    fill([0, 0, 0], 1, 0.22);
-    poly([pt(hl, hw * 1.05, 0.1), pt(-hl, hw * 1.05, 0.1), pt(-hl, -hw * 1.05, 0.1), pt(hl, -hw * 1.05, 0.1)].map((p) => [p[0] + 0.4, p[1] - 0.4, p[2]] as Vec3));
-    const z0 = 0.35, zBand = 1.1, zWin = 2.9, zTop = HEIGHT;
-    const corners: Array<[number, number]> = [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]];
-    for (let i = 0; i < 4; i++) {
-      const [a1, b1] = corners[i], [a2, b2] = corners[(i + 1) % 4];
-      const A = pt(a1, b1, 0), B = pt(a2, b2, 0), nx = B[1] - A[1], ny = -(B[0] - A[0]);
-      if (nx * this.camFwd[0] + ny * this.camFwd[1] >= 0) continue;
-      const k = 0.72 + 0.08 * (i % 2);
-      fill(BAND, k); poly([pt(a1, b1, z0), pt(a2, b2, z0), pt(a2, b2, zBand), pt(a1, b1, zBand)]);
-      fill(BODY, k); poly([pt(a1, b1, zBand), pt(a2, b2, zBand), pt(a2, b2, zTop), pt(a1, b1, zTop)]);
-      fill([26, 36, 48], 1, 0.55); poly([pt(a1, b1, zBand + 0.45), pt(a2, b2, zBand + 0.45), pt(a2, b2, zWin), pt(a1, b1, zWin)]);
-    }
-    fill(BODY, 0.96, 1); poly([pt(hl, hw, zTop), pt(hl, -hw, zTop), pt(-hl, -hw, zTop), pt(-hl, hw, zTop)]);
-    fill([120, 124, 130], 1, 0.9); poly([pt(hl * 0.4, hw * 0.4, zTop + 0.05), pt(hl * 0.4, -hw * 0.4, zTop + 0.05), pt(-hl * 0.2, -hw * 0.4, zTop + 0.05), pt(-hl * 0.2, hw * 0.4, zTop + 0.05)]);
-    ctx.globalAlpha = 1;
+    const pt = (a: number, b: number): [number, number] => proj([c[0] + d[0] * a + r[0] * b + 0.4, c[1] + d[1] * a + r[1] * b + 0.3, c[2] + 0.05]);
+    ctx.globalAlpha = 0.2; ctx.fillStyle = "#000"; ctx.beginPath();
+    [pt(hl, hw), pt(-hl, hw), pt(-hl, -hw), pt(hl, -hw)].forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+    drawCar(ctx, proj, c, d, "bus", CAR, WIDTH, HEIGHT, BODY, view, SUN, pxPerM, false, ends);
   }
 }

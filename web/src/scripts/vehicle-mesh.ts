@@ -26,8 +26,8 @@ const PROFILES: Record<string, Profile> = {
 const meshes = new Map<string, Face[]>();
 
 /** Model in local coordinates: x forward (a), y left (b), z up, origin at the centre on the ground. */
-function mesh(kind: string, L: number, W: number, H: number): Face[] {
-  const key = `${kind}:${L.toFixed(1)}:${W.toFixed(2)}:${H.toFixed(2)}`;
+function mesh(kind: string, L: number, W: number, H: number, ends = 3): Face[] {
+  const key = `${kind}:${L.toFixed(1)}:${W.toFixed(2)}:${H.toFixed(2)}:${ends}`;
   const hit = meshes.get(key);
   if (hit) return hit;
   const prof = PROFILES[kind] ?? PROFILES.car, zb = 0.2, faces: Face[] = [];
@@ -76,7 +76,7 @@ function mesh(kind: string, L: number, W: number, H: number): Face[] {
     faces.push({ p, n: [front ? 1 : -1, 0, 0], m: "body" });
     const a = sec[0][0] + (front ? 0.01 : -0.01), z0 = sec[2][2] - 0.22, z1 = sec[2][2] - 0.05, w = W / 2;
     for (const side of [1, -1]) faces.push({ p: [[a, side * w * 0.85, z0], [a, side * w * 0.45, z0], [a, side * w * 0.45, z1], [a, side * w * 0.85, z1]], n: [front ? 1 : -1, 0, 0], m: front ? "lamp" : "tail" });
-    if (kind === "bus") { // big windscreen at the front, rear window at the back
+    if (kind === "bus" && (ends & (front ? 2 : 1))) { // windscreen at the front, rear window at the back (trams: only the outer ends)
       const g0 = sec[2][2] + (front ? -0.25 : 0.2), g1 = H * 0.86;
       faces.push({ p: [[a, -w * 0.9, g0], [a, w * 0.9, g0], [a, w * 0.9, g1], [a, -w * 0.9, g1]].map((q) => q as Vec3), n: [front ? 1 : -1, 0, 0], m: "glass" });
       if (front) faces.push({ p: [[a, -w * 0.7, H * 0.88], [a, w * 0.7, H * 0.88], [a, w * 0.7, H * 0.96], [a, -w * 0.7, H * 0.96]], n: [1, 0, 0], m: "lamp" }); // destination sign
@@ -94,8 +94,9 @@ const MAT: Record<Mat, [number, number, number]> = { body: [0, 0, 0], glass: [62
  * direction in ENU (for back-face culling and painter's order); `sun` normalised light direction.
  */
 export function drawCar(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number],
-  kind: string, L: number, W: number, H: number, color: [number, number, number], view: Vec3, sun: Vec3, pxPerM: number, taxi = false) {
-  const faces = mesh(kind, L, W, H), r: [number, number] = [-d[1], d[0]]; // left of travel
+  kind: string, L: number, W: number, H: number, color: [number, number, number], view: Vec3, sun: Vec3, pxPerM: number, taxi = false,
+  ends = 3 /* bit 1 rear glass, bit 2 front glass (articulated cars: only at the train's ends) */) {
+  const faces = mesh(kind, L, W, H, ends), r: [number, number] = [-d[1], d[0]]; // left of travel
   const world = (p: Vec3): Vec3 => [c[0] + d[0] * p[0] + r[0] * p[1], c[1] + d[1] * p[0] + r[1] * p[1], c[2] + p[2]];
   const rot = (n: Vec3): Vec3 => [d[0] * n[0] + r[0] * n[1], d[1] * n[0] + r[1] * n[1], n[2]];
   // wheels: dark discs at the four corners (drawn first, the body covers their upper half)
@@ -133,7 +134,8 @@ export function drawCar(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [numbe
       const [x1, y1] = proj(world([a, y, za])), [x2, y2] = proj(world([a, y, zb2]));
       ctx.strokeStyle = css; ctx.lineWidth = width; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     };
-    for (let a = -L / 2 + 1.2; a < L / 2 - 1; a += 1.5) line(a, z0, z1, "rgba(150,30,36,0.9)", Math.max(0.6, pxPerM * 0.12));
+    const pillar = `rgb(${color.map((v) => Math.round(v * 0.62)).join(",")})`; // a darker tone of the body
+    for (let a = -L / 2 + 1.2; a < L / 2 - 1; a += 1.5) line(a, z0, z1, pillar, Math.max(0.6, pxPerM * 0.12));
     for (const a of L > 15 ? [L * 0.38, L * 0.05, -L * 0.3] : [L * 0.38, -L * 0.05]) {
       ctx.fillStyle = "rgba(28,30,34,0.9)"; ctx.beginPath();
       [[a + 0.6, 0.25], [a - 0.6, 0.25], [a - 0.6, z1], [a + 0.6, z1]].forEach(([q, z], i) => { const [x, yy] = proj(world([q, y, z])); i ? ctx.lineTo(x, yy) : ctx.moveTo(x, yy); });
