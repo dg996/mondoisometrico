@@ -439,8 +439,17 @@ async function paintWindow(i: number, j: number) {
       if (e instanceof Error && e.message.includes("skipped for later")) throw e;
     }
   }
-  // .soft windows were soft-accepted below MIN_MATCH: repaint them on every run until they pass.
-  if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j)) && !existsSync(`${localWinFile(i, j)}.soft`)) return;
+  // .soft windows were soft-accepted below MIN_MATCH: repaint them on later runs, but cap the
+  // repaints — stubborn windows (score plateaus below MIN_MATCH) must not burn 3 generations per
+  // pass forever. `--force` or deleting the .soft marker still forces a full repaint.
+  if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) {
+    const sf = `${localWinFile(i, j)}.soft`;
+    if (!existsSync(sf)) return;
+    try {
+      const tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0;
+      if (tries >= 2) return; // gave this window its chances; keep the soft-accepted art
+    } catch { /* unreadable marker: repaint */ }
+  }
   // open sea: reuse the painted sea texture (mirrored per window so repeats don't line up)
   if (existsSync(SEA) && (await seaFraction(i, j)) >= 0.995) {
     let img = sharp(SEA).resize(WIN, WIN);
@@ -526,8 +535,11 @@ async function paintWindow(i: number, j: number) {
   if (bestR && bestR.score >= SOFT_MATCH) {
     const warp = bestR.score > bestR.identity + 0.01;
     await applyRegistration(bestFile, localWinFile(i, j), warp ? bestR : { ...bestR, scale: 1, dx: 0, dy: 0 });
-    writeFileSync(`${localWinFile(i, j)}.soft`, JSON.stringify(bestR));
-    console.warn(`  ${i}_${j}: SOFT-ACCEPT match=${bestR.score.toFixed(2)} < ${MIN_MATCH}; flagged .soft for later repaint`);
+    const sf = `${localWinFile(i, j)}.soft`;
+    let tries = 0;
+    try { tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0; } catch {}
+    writeFileSync(sf, JSON.stringify({ ...bestR, _tries: tries + 1 }));
+    console.warn(`  ${i}_${j}: SOFT-ACCEPT match=${bestR.score.toFixed(2)} < ${MIN_MATCH}; flagged .soft for later repaint (try ${tries + 1}/2)`);
     return;
   }
   throw new Error(`paint ${i}_${j} failed QA after 3 attempts; previous painting retained, batch not ready`);
@@ -755,7 +767,10 @@ async function main() {
       });
       painted += todo.length;
     }
-    if (painted) await assemble(false, false); // finished tiles become visible ring by ring
+    // Mid-batch assemble rebuilds EVERY covered tile (global palette correction): at ~3.5 s/tile
+    // that is minutes per ring late in the batch. Throttle to every 8th ring; the final strict
+    // assemble after the loop still rebuilds everything before paint.json is written.
+    if (painted && r % 8 === 7) await assemble(false, false);
   }
   /* palette QA in assemble covers water and land together */ // then every tile with open water is rebuilt with the harmonised sea
   await assemble(!args.window, true);
