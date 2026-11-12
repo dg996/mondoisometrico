@@ -179,6 +179,13 @@ out body geom;`, area.bbox);
   console.log(`  osm: ${data.elements.length} elements`);
 }
 // Backfill detailed geometry even when an older osm.json is already cached; preserve that cache.
+// Rome's plane-tree rows (Lungotevere, viali) and park woodland: OSM maps them as tree_row ways and
+// wood/forest areas, not single trees. Fetched separately so an existing osm.json cache stays valid.
+if (!existsSync(join(dir, "trees.json"))) {
+  const data = await overpassGrid(`${name}-trees`, (b) => `[out:json][timeout:120];(way["natural"="tree_row"]${b};nwr["natural"="wood"]${b};nwr["landuse"="forest"]${b};nwr["leisure"~"^(park|garden)$"]${b};);out body geom;`, area.bbox);
+  writeFileSync(join(dir, "trees.json"), JSON.stringify(data));
+  console.log(`  tree rows + woodland: ${data.elements.length} elements`);
+}
 if (!existsSync(join(dir,"building-parts.json"))) {
   const data=await overpassGrid(`${name}-building-parts`, (b) => `[out:json][timeout:120];(way["building:part"]["building:part"!="no"]${b};relation["building:part"]["building:part"!="no"]${b};);out body geom;`, area.bbox);
   writeFileSync(join(dir,"building-parts.json"),JSON.stringify(data));

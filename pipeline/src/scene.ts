@@ -391,6 +391,68 @@ for (const f of can.features) {
         }
   }
 }
+// 3b. OSM tree rows (plane trees along the Tiber and the viali) and woodland/park canopy (Villa
+// Borghese, Villa Pamphili, Gianicolo). Without these Rome's parks rendered as flat lawns.
+if (existsSync(join(raw, "trees.json"))) {
+  const CELL = 30, bgrid = new Map<string, P2[][]>(), tgrid = new Map<string, P2[]>();
+  const cellOf = (x: number, y: number) => `${Math.floor(x / CELL)}_${Math.floor(y / CELL)}`;
+  for (const b of buildings) {
+    const xs = b.ring.map((p) => p[0]), ys = b.ring.map((p) => p[1]);
+    for (let gx = Math.floor(Math.min(...xs) / CELL); gx <= Math.floor(Math.max(...xs) / CELL); gx++)
+      for (let gy = Math.floor(Math.min(...ys) / CELL); gy <= Math.floor(Math.max(...ys) / CELL); gy++)
+        (bgrid.get(`${gx}_${gy}`) ?? bgrid.set(`${gx}_${gy}`, []).get(`${gx}_${gy}`)!).push(b.ring);
+  }
+  for (const t of trees) (tgrid.get(cellOf(t[0], t[1])) ?? tgrid.set(cellOf(t[0], t[1]), []).get(cellOf(t[0], t[1]))!).push([t[0], t[1]]);
+  const free = (x: number, y: number, gap: number) => {
+    if ((bgrid.get(cellOf(x, y)) ?? []).some((r) => inside([x, y], r))) return false;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++)
+      for (const q of tgrid.get(`${Math.floor(x / CELL) + dx}_${Math.floor(y / CELL) + dy}`) ?? [])
+        if (Math.hypot(q[0] - x, q[1] - y) < gap) return false;
+    return true;
+  };
+  const plant = (x: number, y: number, r: number, ch: number, gap: number) => {
+    if (!free(x, y, gap)) return 0;
+    trees.push([x, y, r, ch]);
+    (tgrid.get(cellOf(x, y)) ?? tgrid.set(cellOf(x, y), []).get(cellOf(x, y))!).push([x, y]);
+    return 1;
+  };
+  let rows = 0, wood = 0;
+  const data = readJson(join(raw, "trees.json"));
+  for (const el of data.elements) {
+    const t = el.tags ?? {};
+    if (t.natural === "tree_row" && el.geometry) {
+      const g: P2[] = el.geometry.map((q: any) => { const p = toEnu(q.lon, q.lat); return [p[0], p[1]] as P2; });
+      for (let i = 1; i < g.length; i++) {
+        const L = Math.hypot(g[i][0] - g[i - 1][0], g[i][1] - g[i - 1][1]), n = Math.max(1, Math.round(L / 9));
+        for (let k = 0; k < n; k++) {
+          const x = g[i - 1][0] + ((g[i][0] - g[i - 1][0]) * k) / n, y = g[i - 1][1] + ((g[i][1] - g[i - 1][1]) * k) / n;
+          const j = hash(Math.round(x * 7 + y * 13));
+          rows += plant(x, y, 4.2 + j * 1.2, 9 + j * 3, 5); // mature London planes
+        }
+      }
+      continue;
+    }
+    const dense = t.natural === "wood" || t.landuse === "forest";
+    if (!dense && !(t.leisure === "park" || t.leisure === "garden")) continue;
+    for (const coords of outerRings(el)) {
+      const ring = ringFromLonLat(coords, 400);
+      if (!ring) continue;
+      const holes = outerRings(el, "inner").map((c) => ringFromLonLat(c, 25)).filter((r): r is P2[] => !!r);
+      const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]), step = dense ? 7 : 11;
+      for (let x = Math.min(...xs) + step / 2; x < Math.max(...xs); x += step)
+        for (let y = Math.min(...ys) + step / 2; y < Math.max(...ys); y += step) {
+          const j = hash(Math.round(x * 7 + y * 13)), k = hash(Math.round(x * 3 - y * 5));
+          // parks keep open lawns: canopy in irregular clumps (a coarse noise), woods are closed
+          const clump = hash(Math.round(x / 45) * 92821 + Math.round(y / 45) * 68917);
+          if (!dense && (clump < 0.35 || j < 0.3)) continue;
+          const px = x + (j - 0.5) * step * 0.6, py = y + (k - 0.5) * step * 0.6;
+          if (!inside([px, py], ring) || holes.some((h) => inside([px, py], h))) continue;
+          wood += plant(px, py, 3.8 + j * 1.6, 8 + j * 5, dense ? 5 : 6);
+        }
+    }
+  }
+  console.log(`  osm tree rows: ${rows} crowns, woodland/parks: ${wood} crowns`);
+}
 console.log(`  tree crowns: ${trees.length}`);
 
 // 4. Bin objects by the render tiles they can appear on (base … top, + margin).

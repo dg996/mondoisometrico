@@ -38,6 +38,7 @@ import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { landmarkProjector } from "./landmark-anchors.ts";
 import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
+import { FEATHER, FEATHER_VERSION, blendInto, featherAlpha, isDarkTile, neighbourhoodStamp, paintedDistance } from "./edge-feather.ts";
 import { parseArgs } from "node:util";
 
 const TS = 512;                  // web tile size
@@ -141,15 +142,28 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
   let changed = new Set<Key>();
   const jobs: Array<() => Promise<void>> = [];
   const context = new Map<string, { image: Promise<Buffer>; remaining: number }>();
+  // Context blur source: every tile of the layer except near-black render frames (failed GPU runs),
+  // which would otherwise smear a dark band around the painted city.
+  const contextSources = new Map(sources);
+  if (layer === "map") {
+    let dark = 0;
+    for (const [k, file] of sources) if (!file.includes("/paint/") && await isDarkTile(file)) { contextSources.delete(k); dark++; }
+    if (dark) console.log(`  ${layer}: ${dark} near-black render tiles left out of the context blur`);
+  }
+  const contextFor = (k: string, tx: number, ty: number) => {
+    if (!context.has(k)) context.set(k, { image: contextTile(contextSources, tx, ty), remaining: SPLIT * SPLIT });
+    while (context.size > 8) context.delete(context.keys().next().value!);
+    return context.get(k)!;
+  };
   for (const [k, file] of sources) {
     const [tx, ty] = parse(k);
     const painted = layer === "map" && file.includes("/paint/");
     const m = statSync(file).mtimeMs;
-    // Neighbour changes invalidate blurred gutters as well as the tile itself.
-    const neighbours = layer === "map" && !painted ? [-1,0,1].flatMap(dy=>[-1,0,1].map(dx=>{
-      const f=sources.get(key(tx+dx,ty+dy)); return f ? `${f}@${statSync(f).mtimeMs}` : "";
-    })).join("|") : "";
-    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${neighbours}@no-svg-decks@edge${EDGE0}-${EDGE1}@${FORMAT}${QUALITY}`;
+    // Neighbour changes invalidate blurred gutters (and painted feathering) as well as the tile itself.
+    const neighbours = layer === "map" ? [-1,0,1].flatMap(dy=>[-1,0,1].map(dx=>{
+      const f=sources.get(key(tx+dx,ty+dy)); return f ? `${f}@${statSync(f).mtimeMs}@${contextSources.has(key(tx+dx,ty+dy))?1:0}` : "";
+    })).join("|") + `@${neighbourhoodStamp(paintedArt, tx, ty, CAMERA.tile)}` : "";
+    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${FEATHER_VERSION}@${neighbours}@no-svg-decks@edge${EDGE0}-${EDGE1}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
@@ -159,14 +173,18 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
         changed.add(key(x, y));
         jobs.push(async () => {
           let source: string | Buffer = file;
-          if (layer === "map" && !painted) {
-            if (!context.has(k)) context.set(k, {image:contextTile(sources,tx,ty),remaining:SPLIT*SPLIT});
-            const item=context.get(k)!;
-            while(context.size>8) context.delete(context.keys().next().value!);
-            source = await item.image;
-            if(--item.remaining===0) context.delete(k);
+          const cut = { left: i * TS, top: j * TS, width: TS, height: TS };
+          const soft = painted ? featherAlpha(paintedArt, x * TS, y * TS, TS, CAMERA.tile) : null;
+          let blurred: Buffer | null = null;
+          if (layer === "map" && (!painted || soft)) {
+            const item = contextFor(k, tx, ty);
+            blurred = await item.image;
+            if (--item.remaining === 0) context.delete(k);
+            if (!painted) source = blurred;
           }
-          const rgb = await sharp(source).extract({ left: i * TS, top: j * TS, width: TS, height: TS }).removeAlpha().raw().toBuffer();
+          let rgb: Buffer = await sharp(source).extract(cut).removeAlpha().raw().toBuffer();
+          // painted city dissolves into the context blur near unpainted tiles (no hard tile edge)
+          if (soft && blurred) rgb = blendInto(rgb, await sharp(blurred).extract(cut).removeAlpha().raw().toBuffer(), soft);
           const alpha = edgeAlpha(x * TS, y * TS);
           // fade baked toward the page background: opaque tiles, so no seams where tiles meet
           if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
@@ -378,7 +396,9 @@ async function exportRoads(areas: string[], heights: Heights) {
         await heights.ensure(x,y);
         if (!roadSurfaceSafe(heights.at(x,y),enuHeight(q),lift===0)
           || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
-          || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
+          || edgeDistance(x,y)<(EDGE0+EDGE1)/2
+          // nothing drives in the feathered band where the painting dissolves into the blur
+          || paintedDistance(paintedArt,x,y,CAMERA.tile)<FEATHER*0.75) { w.s[k+3]=0; break; }
       }
       if (!w.s[k+3]) break;
     }
