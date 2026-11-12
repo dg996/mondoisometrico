@@ -59,7 +59,7 @@ export async function register(reference: string, painted: string, size = 1024):
 
 /** Warp the painted image by the registration so it overlays the reference. */
 export async function applyRegistration(painted: string, out: string, r: Registration, size = 1024) {
-  if (r.scale === 1 && r.dx === 0 && r.dy === 0) return writeAtomic(sharp(painted).resize(size, size).png(), out);
+  if (r.scale === 1 && r.dx === 0 && r.dy === 0) return writeAtomic(sharp(painted).resize(size, size), out);
   const src = await sharp(painted).resize(size, size).removeAlpha().raw().toBuffer();
   const dst = Buffer.alloc(size * size * 3);
   const c = size / 2;

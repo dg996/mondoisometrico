@@ -11,10 +11,12 @@
  *                                        coastline, rail (bbox + margin, drawn onto the terrain)
  * data/raw/dem/*.tif                     Copernicus GLO-30 elevation (1°×1° tiles, AWS open data)
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { RAW } from "./paths.ts";
+import { fetchCtrnUnits } from "./ctrn.ts";
+import { fetchWorldCover } from "./worldcover.ts";
 
 const EMPTY_FC = { type: "FeatureCollection", features: [] };
 const TLV = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/IView2/MapServer/{layer}/query";
@@ -198,14 +200,19 @@ out body geom;`, area.bbox);
   writeFileSync(join(dir, "roads.json"), JSON.stringify(data));
   console.log(`  roads: ${data.elements.length} ways`);
 }
+// v2: highways and rails are fetched with every tunnel/covered/layer tag and filtered in ground.ts
+// (belowSurface). v1 dropped arches (tunnel=building_passage) at the query, which broke streets at
+// every archway; the old file is kept as ground.v1.json.
+const GROUND_V = join(dir, "ground.v2");
+if (existsSync(join(dir, "ground.json")) && !existsSync(GROUND_V)) renameSync(join(dir, "ground.json"), join(dir, "ground.v1.json"));
 if (!existsSync(join(dir, "ground.json"))) {
   // Smaller margin for Rome test patches keeps Overpass under rate/size limits.
   const [s, w, n, e] = area.bbox, m = area.region === "roma-centro" ? 0.005 : 0.02;
-  const data = await overpassGrid(`${name}-ground`, (b) => `[out:json][timeout:120][maxsize:536870912];
+  const data = await overpassGrid(`${name}-ground-v2`, (b) => `[out:json][timeout:120][maxsize:536870912];
 (
-  way["highway"]["tunnel"!~"yes|building_passage"]${b};
+  way["highway"]${b};
   way["area:highway"]${b};
-  way["railway"~"^(rail|light_rail|tram)$"]["tunnel"!="yes"]${b};
+  way["railway"~"^(rail|light_rail|tram|narrow_gauge)$"]${b};
   nwr["landuse"]${b};
   nwr["leisure"~"^(park|garden|pitch|playground|stadium|track|golf_course|swimming_pool|dog_park|nature_reserve|recreation_ground|marina|sports_centre)$"]${b};
   nwr["natural"~"^(water|beach|sand|scrub|grassland|wood|wetland|coastline|bare_rock|heath)$"]${b};
@@ -219,7 +226,12 @@ if (!existsSync(join(dir, "ground.json"))) {
 out body geom;`, [s - m, w - m, n + m, e + m]);
   writeFileSync(join(dir, "ground.json"), JSON.stringify(data));
   console.log(`  ground: ${data.elements.length} elements`);
+  writeFileSync(GROUND_V, "");
 }
+// Rome: Regione Lazio CTRN volumetric units (measured building heights, CC BY 4.0), whole city once
+if (area.region === "roma-centro") await fetchCtrnUnits(RAW);
+// Rome: ESA WorldCover 2021 land cover (real tree canopy, CC BY 4.0), cropped to the city once
+if (area.region === "roma-centro") await fetchWorldCover(RAW);
 mkdirSync(join(RAW, "dem"), { recursive: true });
 {
   const [s, w, n, e] = area.bbox;

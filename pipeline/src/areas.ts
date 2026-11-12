@@ -32,6 +32,24 @@ export const AREAS: Record<string, Area> = {
     title: "Flaminio · Ponte Milvio", region: "roma-centro",
     bbox: [41.925, 12.450, 41.950, 12.510],
   },
+  /** Context ring south: rendered and exported as blurred context; paint only after the pilot is approved. */
+  "roma-sud": {
+    title: "Garbatella · San Paolo", region: "roma-centro",
+    bbox: [41.840, 12.455, 41.870, 12.510],
+  },
+  /** Context ring east: rendered and exported as blurred context; paint only after the pilot is approved. */
+  "roma-est": {
+    title: "Pigneto · Torpignattara · Centocelle", region: "roma-centro",
+    bbox: [41.865, 12.530, 41.905, 12.580],
+  },
+  /**
+   * Roma fino al Grande Raccordo Anulare: bbox of OSM highway=motorway ref=A90 (Overpass, 2026-11-12).
+   * ~4760 render tiles, ~6450 paint windows; paint grows in rings from the centre.
+   */
+  "roma-gra": {
+    title: "Roma · Raccordo", region: "roma-centro",
+    bbox: [41.794, 12.373, 41.991, 12.616],
+  },
   /** Small pilot patch (kept for quick tests). */
   pantheon: {
     title: "Pantheon · Piazza Navona",
@@ -41,17 +59,8 @@ export const AREAS: Record<string, Area> = {
 };
 
 /** Proposal only: NOT accepted by openArea or exported until a separate expansion batch is approved.
- * Preserve the region origin/camera. Finish the current playable rectangle before adding these. */
-export const AREA_PROPOSALS: Record<string, Area> = {
-  "roma-sud": {
-    title: "Garbatella · San Paolo", region: "roma-centro",
-    bbox: [41.840, 12.455, 41.870, 12.510],
-  },
-  "roma-est": {
-    title: "Pigneto · Torpignattara · Centocelle", region: "roma-centro",
-    bbox: [41.865, 12.530, 41.905, 12.580],
-  },
-};
+ * Preserve the region origin/camera. roma-sud and roma-est were promoted to AREAS (context only). */
+export const AREA_PROPOSALS: Record<string, Area> = {};
 
 /** Look up an area and switch the camera to its region: call before any projection. */
 export function openArea(name: string): Area {

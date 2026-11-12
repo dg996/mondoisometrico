@@ -9,12 +9,16 @@
  *   t: tree crowns [x, y, radius, crown height above ground]
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import sharp from "sharp";
 import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { CAMERA, ecefToEnu, enuToPixel, llhToEcef } from "./camera.ts";
 import { osmSolid, hasCompleteParts, type BuildingDetail, type SceneBuilding } from "./building-shape.ts";
 import { SEA_H } from "./heights.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
+import { AURELIAN_WALLS, insideRing, romanFallbackHeight, romanLook } from "./roma-style.ts";
+import type { CtrnUnit } from "./ctrn.ts";
+import polygonClipping from "polygon-clipping";
 
 type P2 = [number, number];
 const T = CAMERA.tile;
@@ -186,7 +190,10 @@ function outerRings(el: any, role = "outer"): number[][][] {
 }
 
 const name = process.argv[2] ?? "roma-core";
-const bbox = openArea(name).bbox;
+const area = openArea(name), bbox = area.bbox;
+/** Rome: Roman palazzi / palazzine / travertine instead of Tel Aviv's Bauhaus, glass and solar heaters. */
+const ROMA = area.region === "roma-centro";
+const WALLS: P2[] = AURELIAN_WALLS.map(([lat, lon]) => { const p = toEnu(lon, lat); return [p[0], p[1]] as P2; });
 const raw = join(RAW, name);
 const out = join(DERIVED, name, "scene");
 rmSync(out, { recursive: true, force: true });
@@ -238,9 +245,82 @@ const partElements = osm.elements.filter((el:any)=>el.tags?.["building:part"] &&
 const coloredParents = osm.elements.filter((el:any)=>el.tags?.building && (el.tags["building:colour"] || el.tags["roof:colour"]))
   .flatMap((el:any)=>outerRings(el).map(coords=>({ring:ringFromLonLat(coords),tags:el.tags}))).filter((p:any)=>p.ring);
 const partRings = partElements.flatMap((el:any)=>outerRings(el).map(coords=>ringFromLonLat(coords,0.1)).filter(Boolean)) as P2[][];
+/** Parts with their vertical extent: an outline whose parts stand on its roof is only their base. */
+const partMeta = partElements.flatMap((el:any)=>outerRings(el).map(coords=>ringFromLonLat(coords,0.1)).filter(Boolean).map((ring:any)=>({
+  c: [ring.reduce((a:number,p:P2)=>a+p[0],0)/ring.length, ring.reduce((a:number,p:P2)=>a+p[1],0)/ring.length] as P2,
+  minH: parseFloat(el.tags["min_height"]) || 0, h: parseFloat(el.tags.height) || 0 })));
 // A relation owns its member outlines: drawing both fills courtyards and doubles landmark masses.
 const memberWays = new Set<number>(osm.elements.filter((el:any)=>el.type === "relation" && osmSolid(el.tags??{}))
   .flatMap((el:any)=>(el.members??[]).filter((m:any)=>m.type === "way" && ["outer","inner"].includes(m.role)).map((m:any)=>m.ref)));
+// Rome: parts inside a church / monument (Pantheon drum, portico, domes) take the monument's
+// travertine/brick look, never a palazzo's plaster and shutters.
+const monumentRings: P2[][] = ROMA ? osm.elements.filter((el:any)=>{
+  const t = el.tags ?? {};
+  return t.building && (landmarkHeight(t) || t.amenity === "place_of_worship" || ["church","cathedral","basilica","chapel","temple"].includes(t.building));
+}).flatMap((el:any)=>outerRings(el).map(c=>ringFromLonLat(c)).filter(Boolean)) as P2[][] : [];
+/** OSM materials -> colours (building:colour / roof:colour still win). */
+const WALL_MATERIAL: Record<string,string> = { brick:"#a85f42", concrete:"#b3aea4", stone:"#d9cfba", marble:"#eeebe4", plaster:"", travertine:"#ddd3bc" };
+const ROOF_MATERIAL: Record<string,string> = { concrete:"#a4a29c", lead:"#8f9190", metal:"#8c9094", copper:"#6f9a8a", roof_tiles:"#a8674c", tiles:"#a8674c", stone:"#cfc6b2", glass:"#9fb3bd" };
+/** OSM colour names (building:colour=sand, roof:colour=lightcoral…) as muted hex; unknown -> undefined,
+ * so the Roman look applies instead of the renderer's fallback (which painted the Colosseo terracotta). */
+const NAMED: Record<string,string> = { white:"#f1eee6", lightyellow:"#f0e7c8", yellow:"#e0c060", cream:"#ece2c6", beige:"#e2d5b6",
+  sand:"#d9c8a3", ochre:"#cc9a4c", orange:"#d58a4c", lightcoral:"#c48a74", coral:"#c4785e", pink:"#e0a99c", salmon:"#df9e84",
+  red:"#a8503c", darkred:"#7f3a2c", brown:"#8a5a3c", terracotta:"#b5643f", grey:"#9a9a96", gray:"#9a9a96", lightgrey:"#c8c6c0",
+  lightgray:"#c8c6c0", darkgrey:"#6e6e6c", darkgray:"#6e6e6c", silver:"#bdbdb8", black:"#3a3a3a", green:"#6f8f6a", tan:"#cdb490" };
+const colour = (v?: string) => !v ? undefined : /^#[0-9a-f]{6}$/i.test(v) ? v : /^#[0-9a-f]{3}$/i.test(v) ? "#" + [...v.slice(1)].map((c) => c + c).join("") : NAMED[v.toLowerCase().replace(/[\s_-]/g, "")];
+const DOME = "#9c9a93"; // Rome's domes are lead / concrete grey whatever the tag says
+// Rome: surveyed volumes of the Regione Lazio CTRN 1:5000 (ctrn.ts), clipped to each OSM footprint.
+// OSM decides WHERE a building is today; the CTRN says how tall every part of it is. Each piece keeps
+// its measured height, so stepped palazzi, naves, bell towers and drums/domes stand at real heights.
+type Unit = { ring: P2[]; h: number; id: number; a: number; box: number[] };
+const ctrnUnits: Unit[] = [];
+const UCELL = 40, ugrid = new Map<string, Unit[]>();
+if (ROMA && existsSync(join(RAW, "ctrn", "units.json"))) {
+  const [S0, W0, N0, E0] = bbox, m = 0.01;
+  for (const u of readJson<CtrnUnit[]>(join(RAW, "ctrn", "units.json"))) {
+    if (!u.r.some(([lo, la]) => la > S0 - m && la < N0 + m && lo > W0 - m && lo < E0 + m)) continue;
+    const ring = ringFromLonLat(u.r, 4);
+    if (!ring) continue;
+    const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
+    const unit = { ring, h: u.h, id: u.id, a: Math.abs(area2(ring)), box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] };
+    ctrnUnits.push(unit);
+    for (let gx = Math.floor(unit.box[0] / UCELL); gx <= Math.floor(unit.box[2] / UCELL); gx++)
+      for (let gy = Math.floor(unit.box[1] / UCELL); gy <= Math.floor(unit.box[3] / UCELL); gy++)
+        (ugrid.get(`${gx}_${gy}`) ?? ugrid.set(`${gx}_${gy}`, []).get(`${gx}_${gy}`)!).push(unit);
+  }
+  console.log(`  ctrn volumetric units near the area: ${ctrnUnits.length}`);
+}
+const closeRing = (r: P2[]) => [...r, r[0]];
+/** Pieces of CTRN volumes inside an OSM footprint (minus courtyards), the uncovered rest, and the cover. */
+function unitsIn(ring: P2[], holes: P2[][]) {
+  const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]), seen = new Set<Unit>();
+  const foot: any = [closeRing(ring), ...holes.map(closeRing)];
+  const area = Math.abs(area2(ring)) - holes.reduce((t, h) => t + Math.abs(area2(h)), 0);
+  const pieces: Array<{ ring: P2[]; holes: P2[][]; h: number; a: number }> = [];
+  const hit: any[] = [];
+  for (let gx = Math.floor(Math.min(...xs) / UCELL); gx <= Math.floor(Math.max(...xs) / UCELL); gx++)
+    for (let gy = Math.floor(Math.min(...ys) / UCELL); gy <= Math.floor(Math.max(...ys) / UCELL); gy++)
+      for (const u of ugrid.get(`${gx}_${gy}`) ?? []) {
+        if (seen.has(u) || u.box[2] < Math.min(...xs) || u.box[0] > Math.max(...xs) || u.box[3] < Math.min(...ys) || u.box[1] > Math.max(...ys)) continue;
+        seen.add(u);
+        let cut: P2[][][] = [];
+        try { cut = polygonClipping.intersection(foot, [closeRing(u.ring)]) as P2[][][]; } catch { continue; }
+        for (const poly of cut) {
+          const outer = poly[0].slice(0, -1), inner = poly.slice(1).map((r) => r.slice(0, -1));
+          const a = Math.abs(area2(outer)) - inner.reduce((t, r) => t + Math.abs(area2(r)), 0);
+          if (a < 4) continue;
+          pieces.push({ ring: area2(outer) < 0 ? outer.reverse() : outer, holes: inner, h: u.h, a });
+          hit.push([closeRing(u.ring)]);
+        }
+      }
+  const covered = pieces.reduce((t, p) => t + p.a, 0);
+  let rest: P2[][][] = [];
+  if (pieces.length && covered < area * 0.92) {
+    try { rest = (polygonClipping.difference(foot, ...hit) as P2[][][]).map((poly) => poly.map((r) => r.slice(0, -1))); } catch { rest = []; }
+  }
+  return { pieces, rest, cover: covered / Math.max(1, area) };
+}
+let ctrnBuildings = 0, ctrnVolumes = 0, ctrnHeights = 0;
 let osmCount = 0;
 const trees: Array<[number, number, number, number]> = [];
 for (const el of osm.elements) {
@@ -288,28 +368,87 @@ for (const el of osm.elements) {
     const holes = outerRings(el,"inner").map(coords=>ringFromLonLat(coords,0.1)).filter((r):r is P2[]=>!!r && inside(r[0],ring));
     // OSM rings already encode geographic orientation: never rotate an entire footprint
     // to expose a facade to the camera. Real tagged heights precede fallback massing.
-    let h = parseFloat(t.height) || (levels ? levels * FLOOR + 1 : 0) || lh;
+    const historic = ROMA && insideRing(c, WALLS);
+    const inMonument = isPart && monumentRings.some((r) => insideRing(c, r));
+    const look = ROMA ? romanLook(t, historic, !!lh || isFountain || isMonument || inMonument, hash(el.id * 7 + part), hash(el.id * 13 + part + 1)) : null;
+    // CTRN: rebuild the footprint from surveyed volumes (not landmarks with their own OSM 3D parts)
+    const ctrn = ctrnUnits.length && look && !isPart && !lh && !isFountain && !isMonument ? unitsIn(ring, holes) : null;
+    if (ctrn && ctrn.cover >= 0.5) {
+      const worship = look!.style === 8;
+      const meanH = ctrn.pieces.reduce((t2, p) => t2 + p.h * p.a, 0) / ctrn.pieces.reduce((t2, p) => t2 + p.a, 0);
+      const parts = [...ctrn.pieces, ...ctrn.rest.map(([o, ...inner]) => ({ ring: area2(o) < 0 ? o.reverse() : o, holes: inner, h: meanH, a: Math.abs(area2(o)) }))
+        .filter((p) => p.a >= 10 && p.ring.length >= 3)];
+      const tallest = ctrn.pieces.reduce((a, p) => (p.h > a.h ? p : a), ctrn.pieces[0]);
+      for (const u of parts) {
+        // a church's tallest compact piece, well above the nave, is its drum + dome
+        const r = Math.sqrt(u.a / Math.PI), xs = u.ring.map((p) => p[0]), ys = u.ring.map((p) => p[1]);
+        const compact = u.a / ((Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)) || 1) > 0.7;
+        const others = parts.filter((v) => v !== u).map((v) => v.h);
+        const dome = worship && u === tallest && compact && r > 4 && u.h > Math.max(0, ...others) + 4;
+        // palazzi: CTRN height is the eave line; the coppi roof sits on top. Churches keep their survey top.
+        const roof = !worship && look!.roof > 0 && !t["roof:shape"] && u.h > 7 && u.a > 30 ? Math.min(look!.roof, u.h * 0.2) : 0;
+        buildings.push({
+          ring: u.ring, h: Math.round((u.h + roof) * 10) / 10, s: look!.style, g: null, keepInPlaza: true,
+          detail: {
+            part: false, minHeight: 0, holes: u.holes,
+            roofShape: dome ? "dome" : roof ? "roman" : worship ? "hipped" : undefined,
+            roofHeight: dome ? Math.min(r, u.h * 0.45) : roof || (worship && u.a > 150 ? Math.min(4, u.h * 0.15) : 0),
+            wallColor: colour(t["building:colour"]) ?? (WALL_MATERIAL[t["building:material"]] || look!.wallColor),
+            roofColor: dome ? DOME : colour(t["roof:colour"]) ?? (ROOF_MATERIAL[t["roof:material"]] || look!.roofColor),
+          },
+        });
+        ctrnVolumes++;
+      }
+      ctrnBuildings++; osmCount++; part++;
+      continue;
+    }
+    let h: number = parseFloat(t.height) || (levels ? levels * (look?.floor ?? FLOOR) + (look ? 1.5 : 1) : 0) || lh || 0;
+    // partly surveyed footprint: area-weighted CTRN height beats any guess (and an unsourced OSM height)
+    if (ctrn && ctrn.cover >= 0.2 && !levels) {
+      h = ctrn.pieces.reduce((t2, p) => t2 + p.h * p.a, 0) / ctrn.pieces.reduce((t2, p) => t2 + p.a, 0) + (look!.roof > 0 ? look!.roof : 0);
+      ctrnHeights++;
+    }
     if (!h) {
       if (isFountain) h = 4;
       else if (["house", "garage", "shed", "kiosk"].includes(t.building)) h = 5;
+      else if (look) h = romanFallbackHeight(Math.abs(area2(ring)), historic, hash(el.id * 3 + part));
       else h = Math.abs(area2(ring)) > 1500 ? 14 : 13;
     }
+    // OSM Simple 3D Buildings: an outline whose tagged height is reached only by its parts (San Pietro:
+    // 136.5 m is the lantern cross) is drawn as the base the elevated parts stand on, not a 136 m box.
+    let baseOfParts = false;
+    if (!isPart) {
+      const inner = partMeta.filter((q:any) => inside(q.c, ring));
+      if (inner.length >= 3 && inner.some((q:any) => q.h >= h * 0.7)) {
+        const bases = inner.map((q:any) => q.minH).filter((v:number) => v > 5 && v < h * 0.6).sort((a:number, b:number) => a - b);
+        if (bases.length) { h = bases[Math.floor(bases.length / 2)]; baseOfParts = true; }
+      }
+    }
     // secondary outers of a multipolygon (arcade wings, annexes) stay a bit lower than the main mass
-    if (lh && !isFountain && !t.height && !levels && part > 0) h = Math.max(8, h * 0.55);
+    if (lh && !isFountain && !t.height && !levels && part > 0 && !baseOfParts) h = Math.max(8, h * 0.55);
     const parent = isPart ? coloredParents.find((p:any)=>inside(c,p.ring))?.tags : undefined;
+    // Rome: untagged palazzi get the city's hipped coppi roof (~3 m), tagged pitched roofs a real height
+    const romanRoof = !!look && look.roof > 0 && !isPart && !baseOfParts && !t["roof:shape"] && !t["roof:height"] && h > 7;
+    const roofShape = t["roof:shape"] ?? (romanRoof ? "roman" : undefined);
+    const tagged = parseFloat(t["roof:height"]) || 0;
+    const roofHeight = el.type === "relation" && el.id === 3373289 ? 21.65 // Pantheon: drum + dome, not a 40 m roof on a 4 m wall
+      : tagged || (romanRoof ? Math.min(look!.roof, h * 0.2) : look && ["hipped", "gabled", "pyramidal"].includes(roofShape ?? "") ? Math.min(3, h * 0.2) : 0);
     const detail: BuildingDetail = {holes, part:isPart, minHeight:parseFloat(t.min_height)||0,
-      roofShape:t["roof:shape"],
-      // Pantheon: surveyed 43.3 m hemispherical interior; the OSM roof:height=40 describes
-      // the enclosing drum + dome, not a 40 m roof on top of a 4 m wall.
-      roofHeight:el.type === "relation" && el.id === 3373289 ? 21.65 : parseFloat(t["roof:height"])||0,
+      roofShape, roofHeight,
       roofDirection: t["roof:direction"] ? Number(t["roof:direction"]) : undefined,
-      roofAcross:t["roof:orientation"] === "across",wallColor:t["building:colour"] ?? parent?.["building:colour"],roofColor:t["roof:colour"] ?? parent?.["roof:colour"]};
-    buildings.push({ ring, h, s: style(h, kind, el.id + part, null, !!lh || isPart), g: null, detail, keepInPlaza: isPart || !!lh || !!t.name || !!t["name:en"] });
+      roofAcross:t["roof:orientation"] === "across",
+      wallColor: look ? colour(t["building:colour"]) ?? colour(parent?.["building:colour"]) ?? (WALL_MATERIAL[t["building:material"]] || look.wallColor)
+        : t["building:colour"] ?? parent?.["building:colour"],
+      roofColor: look ? (roofShape === "dome" ? DOME : colour(t["roof:colour"]) ?? colour(parent?.["roof:colour"]) ?? (ROOF_MATERIAL[t["roof:material"]] || look.roofColor))
+        : t["roof:colour"] ?? parent?.["roof:colour"]};
+    const s = look ? look.style : style(h, kind, el.id + part, null, !!lh || isPart);
+    buildings.push({ ring, h, s, g: null, detail, keepInPlaza: isPart || !!lh || !!t.name || !!t["name:en"] });
     osmCount++;
     part++;
   }
 }
 console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
+if (ROMA) console.log(`  ctrn: ${ctrnBuildings} buildings rebuilt from ${ctrnVolumes} surveyed volumes, ${ctrnHeights} more with surveyed height`);
 
 // Clear clutter from monument plazas. Piazza Venezia and the Colosseum valley must stay open:
 // OSM stubs / kiosks / wrong outers otherwise extrude as apartment blocks and paint invents more.
@@ -393,6 +532,8 @@ for (const f of can.features) {
 }
 // 3b. OSM tree rows (plane trees along the Tiber and the viali) and woodland/park canopy (Villa
 // Borghese, Villa Pamphili, Gianicolo). Without these Rome's parks rendered as flat lawns.
+/** Rome uses measured canopy (ESA WorldCover 2021, CC BY 4.0) instead of filling parks at random. */
+const useCanopy = ROMA && existsSync(join(RAW, "worldcover", "roma.png")) && existsSync(join(DERIVED, name, "ground", "features.json"));
 if (existsSync(join(raw, "trees.json"))) {
   const CELL = 30, bgrid = new Map<string, P2[][]>(), tgrid = new Map<string, P2[]>();
   const cellOf = (x: number, y: number) => `${Math.floor(x / CELL)}_${Math.floor(y / CELL)}`;
@@ -432,6 +573,7 @@ if (existsSync(join(raw, "trees.json"))) {
       }
       continue;
     }
+    if (useCanopy) continue; // Rome: parks and woods take real canopy from WorldCover (below), not a guessed fill
     const dense = t.natural === "wood" || t.landuse === "forest";
     if (!dense && !(t.leisure === "park" || t.leisure === "garden")) continue;
     for (const coords of outerRings(el)) {
@@ -450,6 +592,56 @@ if (existsSync(join(raw, "trees.json"))) {
           wood += plant(px, py, 3.8 + j * 1.6, 8 + j * 5, dense ? 5 : 6);
         }
     }
+  }
+  // 3c. Real canopy (Rome): ESA WorldCover 2021 10 m "tree cover" pixels, in compact groups only (a lone
+  // pixel is noise), never on buildings, carriageways, paved squares, water or sports grounds.
+  if (useCanopy) {
+    const meta = readJson<{ lat0: number; lon0: number; pxPerDeg: number; width: number; height: number }>(join(RAW, "worldcover", "roma.json"));
+    const mask = await sharp(join(RAW, "worldcover", "roma.png")).extractChannel(0).raw().toBuffer(); // one class byte per pixel
+    const at = (c: number, r: number) => (c >= 0 && r >= 0 && c < meta.width && r < meta.height && mask[r * meta.width + c] === 10 ? 1 : 0);
+    const feats = readJson<Array<{ k: string; r?: P2[][]; l?: P2[]; w?: number; bridge?: boolean }>>(join(DERIVED, name, "ground", "features.json"));
+    const G = 40, blockPoly = new Map<string, P2[][][]>(), blockLine = new Map<string, Array<[number, number, number, number, number]>>();
+    const cells = (x0: number, y0: number, x1: number, y1: number, fn: (k: string) => void) => {
+      for (let gx = Math.floor(x0 / G); gx <= Math.floor(x1 / G); gx++) for (let gy = Math.floor(y0 / G); gy <= Math.floor(y1 / G); gy++) fn(`${gx}_${gy}`);
+    };
+    for (const f of feats) {
+      if (f.r && ["paving", "water", "pool", "pitch", "track", "parking", "sea", "sand", "playground"].includes(f.k)) {
+        const p = f.r.flat(), xs = p.map((q) => q[0]), ys = p.map((q) => q[1]);
+        cells(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), (k) => (blockPoly.get(k) ?? blockPoly.set(k, []).get(k)!).push(f.r!));
+      } else if (f.l && ["street", "highway", "lane", "plaza", "rail", "crossing"].includes(f.k)) {
+        const half = (f.w ?? 4) / 2 + 1.2;
+        for (let i = 1; i < f.l.length; i++) {
+          const [ax, ay] = f.l[i - 1], [bx, by] = f.l[i];
+          cells(Math.min(ax, bx) - half, Math.min(ay, by) - half, Math.max(ax, bx) + half, Math.max(ay, by) + half, (k) => (blockLine.get(k) ?? blockLine.set(k, []).get(k)!).push([ax, ay, bx, by, half]));
+        }
+      }
+    }
+    const evenOdd = ([x, y]: P2, rings: P2[][]) => { let c = false; for (const r of rings) for (let i = 0, j = r.length - 1; i < r.length; j = i++) { const [xi, yi] = r[i], [xj, yj] = r[j]; if (yi > y !== yj > y && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+    const blocked = (x: number, y: number) => {
+      const k = `${Math.floor(x / G)}_${Math.floor(y / G)}`;
+      if ((blockPoly.get(k) ?? []).some((rings) => evenOdd([x, y], rings))) return true;
+      for (const [ax, ay, bx, by, half] of blockLine.get(k) ?? []) {
+        const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy || 1e-9, u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L));
+        if (Math.hypot(x - ax - u * dx, y - ay - u * dy) < half) return true;
+      }
+      return false;
+    };
+    const [S0, W0, N0, E0] = bbox, m = 0.004;
+    const r0 = Math.max(1, Math.floor((meta.lat0 - (N0 + m)) * meta.pxPerDeg)), r1 = Math.min(meta.height - 2, Math.ceil((meta.lat0 - (S0 - m)) * meta.pxPerDeg));
+    const c0 = Math.max(1, Math.floor((W0 - m - meta.lon0) * meta.pxPerDeg)), c1 = Math.min(meta.width - 2, Math.ceil((E0 + m - meta.lon0) * meta.pxPerDeg));
+    let canopy = 0, noise = 0, refused = 0;
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      if (!at(c, r)) continue;
+      let n = 0;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) n += at(c + dc, r + dr);
+      if (n < 5) { noise++; continue; } // isolated tree pixels: WorldCover noise at 10 m
+      const j = hash(r * 7919 + c * 104729), k2 = hash(r * 31 + c * 17 + 5);
+      const lat = meta.lat0 - (r + 0.5 + (k2 - 0.5) * 0.6) / meta.pxPerDeg, lon = meta.lon0 + (c + 0.5 + (j - 0.5) * 0.6) / meta.pxPerDeg;
+      const [x, y] = toEnu(lon, lat);
+      if (blocked(x, y)) { refused++; continue; }
+      canopy += plant(x, y, 3.2 + j * 1.8, 7 + j * 6, 5.5);
+    }
+    console.log(`  canopy (ESA WorldCover): ${canopy} crowns; ${noise} isolated pixels and ${refused} on streets/squares/water left out`);
   }
   console.log(`  osm tree rows: ${rows} crowns, woodland/parks: ${wood} crowns`);
 }

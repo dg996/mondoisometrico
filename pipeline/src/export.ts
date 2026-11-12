@@ -21,7 +21,7 @@
  *
  * Tile (x, y) at zoom z covers global art pixels [x·512·2^(8-z), …); z = 8 is 1:1.
  */
-import { isOneway, roadLanes, roadWidth } from "./roadspec.ts";
+import { belowSurface, isOneway, roadLanes, roadWidth } from "./roadspec.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -38,6 +38,8 @@ import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { landmarkProjector } from "./landmark-anchors.ts";
 import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
+import { fetchGtfs, readTransit } from "./transit.ts";
+import { cloudEdge } from "./clouds.ts";
 import { FEATHER, FEATHER_VERSION, blendInto, featherAlpha, isDarkTile, neighbourhoodStamp, paintedDistance } from "./edge-feather.ts";
 import { parseArgs } from "node:util";
 
@@ -51,29 +53,26 @@ const MARGIN = 16; // neighbour pixels used when building each zoomed-out tile
 /** Soft map edge: tiles fade out toward the areas' true outline instead of ending in tile steps.
  *  Fully transparent within EDGE0 of the outline (half a render tile's diagonal: the staircase
  *  never shows), fully opaque from EDGE1 in. */
-const EDGE0 = 760, EDGE1 = EDGE0 + 1800;
+// the outer band is a bank of clouds (clouds.ts): ~650 m on the whole map, narrower on a small area
+// (a 1 km test patch would otherwise vanish under it); set from the outlines in main()
+let EDGE0 = 760, EDGE1 = EDGE0 + 2600;
 let outlines: Array<Array<[number, number]>> = [];
 /** web/src/pages/index.astro #map background (#0e0f12): the edge fades into it */
 const BG = CONTEXT_BACKGROUND;
-const edgeDistance = (x: number, y: number) => Math.max(0, ...outlines.map((o) => insideDistance([x, y], o)));
+/** Render tiles that exist: the clouds also close in on the tile staircase where rendering stops short
+ *  of the outline (a small area showed hard beige rectangles at its corners). */
+let rendered = new Set<string>();
+const edgeDistance = (x: number, y: number) => Math.min(Math.max(0, ...outlines.map((o) => insideDistance([x, y], o))),
+  rendered.size ? paintedDistance(rendered, x, y, CAMERA.tile, EDGE1 + 64) + EDGE0 * 0.5 : Infinity);
 
 /** Exact painted keys also drive the client activity mask. */
 let paintedArt = new Set<string>();
 
 /** Native web tile at global art px (x0, y0): fade alpha near the map edge (null = fully inside). */
-function edgeAlpha(x0: number, y0: number): Buffer | null {
+/** Any part of the web tile at (x0, y0) inside the cloud band (or beyond it)? */
+function nearEdge(x0: number, y0: number) {
   const corners = [[x0, y0], [x0 + TS, y0], [x0, y0 + TS], [x0 + TS, y0 + TS]];
-  if (Math.min(...corners.map(([x, y]) => edgeDistance(x, y))) >= EDGE1) return null;
-  const a = Buffer.alloc(TS * TS), step = 8; // distance on an 8 px lattice, bilinear in between
-  const n = TS / step + 1, grid = new Float32Array(n * n);
-  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) grid[j * n + i] = edgeDistance(x0 + i * step, y0 + j * step);
-  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
-    const gx = x / step, gy = y / step, i = Math.floor(gx), j = Math.floor(gy), fx = gx - i, fy = gy - j;
-    const d = (grid[j * n + i] * (1 - fx) + grid[j * n + i + 1] * fx) * (1 - fy) + (grid[(j + 1) * n + i] * (1 - fx) + grid[(j + 1) * n + i + 1] * fx) * fy;
-    const t = Math.min(1, Math.max(0, (d - EDGE0) / (EDGE1 - EDGE0)));
-    a[y * TS + x] = Math.round(t * t * (3 - 2 * t) * 255);
-  }
-  return a;
+  return Math.min(...corners.map(([x, y]) => edgeDistance(x, y))) < EDGE1;
 }
 
 type Key = `${number}_${number}`;
@@ -163,7 +162,7 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
     const neighbours = layer === "map" ? [-1,0,1].flatMap(dy=>[-1,0,1].map(dx=>{
       const f=sources.get(key(tx+dx,ty+dy)); return f ? `${f}@${statSync(f).mtimeMs}@${contextSources.has(key(tx+dx,ty+dy))?1:0}` : "";
     })).join("|") + `@${neighbourhoodStamp(paintedArt, tx, ty, CAMERA.tile)}` : "";
-    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${FEATHER_VERSION}@${neighbours}@no-svg-decks@edge${EDGE0}-${EDGE1}@${FORMAT}${QUALITY}`;
+    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${FEATHER_VERSION}@${neighbours}@no-svg-decks@clouds3-edge${EDGE0}-${EDGE1}@${FORMAT}${QUALITY}`;
     for (let j = 0; j < SPLIT; j++)
       for (let i = 0; i < SPLIT; i++) {
         const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
@@ -185,10 +184,9 @@ async function exportLayer(layer: string, sources: Map<Key, string>) {
           let rgb: Buffer = await sharp(source).extract(cut).removeAlpha().raw().toBuffer();
           // painted city dissolves into the context blur near unpainted tiles (no hard tile edge)
           if (soft && blurred) rgb = blendInto(rgb, await sharp(blurred).extract(cut).removeAlpha().raw().toBuffer(), soft);
-          const alpha = edgeAlpha(x * TS, y * TS);
-          // fade baked toward the page background: opaque tiles, so no seams where tiles meet
-          if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
-            rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * (alpha[p] / 255));
+          // map edge: the city disappears into clouds that thin into the page background (opaque tiles,
+          // global-coordinate noise: no seams where tiles meet)
+          if (nearEdge(x * TS, y * TS)) cloudEdge(rgb, x * TS, y * TS, TS, (px, py) => (edgeDistance(px, py) - EDGE0) / (EDGE1 - EDGE0), BG);
           await save(sharp(rgb, { raw: { width: TS, height: TS, channels: 3 } }), NATIVE_Z, x, y);
         });
       }
@@ -335,7 +333,7 @@ async function exportRoads(areas: string[], heights: Heights) {
       const t = el.tags ?? {};
       if (seen.has(el.id)) return false;
       seen.add(el.id);
-      return el.geometry?.length >= 2 && (!t.tunnel || t.tunnel === "no") && (!t.covered || t.covered === "no") && !String(t.layer ?? "").startsWith("-") && roadWidth(t) > 0;
+      return el.geometry?.length >= 2 && (!t.tunnel || t.tunnel === "no") && (!t.covered || t.covered === "no") && !belowSurface(t) && roadWidth(t) > 0; // no cars through arches either
     });
     // split ways at every node another road shares, so junctions are always way ends
     const use = new Map<number, number>();
@@ -406,6 +404,81 @@ async function exportRoads(areas: string[], heights: Heights) {
   occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);
   writeData("roads", JSON.stringify(encodeRoads(ways)));
   console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
+}
+
+/**
+ * Public transport (Rome GTFS, CC BY-SA; transit.ts): bus lines as ENU guide paths for the viewer's
+ * road graph, tram lines as their own sampled tracks with terrain / bridge-deck height and the same
+ * visibility rule as the roads (asphalt visible, painted, outside the cloud and feather bands).
+ */
+async function exportTransit(areas: string[], heights: Heights) {
+  if (activeRegion() !== "roma-centro") return;
+  const feed = await fetchGtfs(RAW);
+  const grids = areas.map((a) => {
+    const dir = join(DERIVED, a, "ground");
+    const meta = readJson<TerrainMeta>(join(dir, "meta.json"));
+    const b = readFileSync(join(dir, "height.bin"));
+    const features = readJson<Array<{ id?: number; bridge?: boolean; l?: Point[]; k: string; r?: Point[][] }>>(join(dir, "features.json"));
+    const water = features.filter((f) => ["water", "sea", "pool"].includes(f.k) && f.r).map((f) => f.r!);
+    return { meta, terrain: new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)), water,
+      bridges: features.filter((f) => f.bridge && f.l).map((f) => f.l!) };
+  });
+  const ground = (x: number, y: number) => { for (const g of grids) { const z = groundAt(g.meta, g.terrain, x, y); if (z !== null) return z; } return null; };
+  const wet = (x: number, y: number) => grids.some((g) => inWater(x, y, g.water));
+  const decks = grids.flatMap((g) => g.bridges).map((l) => bridgeProfile(l, ground, wet)).filter((d): d is NonNullable<typeof d> => !!d);
+  const painted = (e: number, n: number) => { const z = ground(e, n) ?? 60, [x, y] = enuToPixel([e, n, z]); return paintedArt.has(key(Math.floor(x / CAMERA.tile), Math.floor(y / CAMERA.tile))); };
+  const toEnu = (lon: number, lat: number): [number, number] => { const p = ecefToEnu(llhToEcef(lat, lon, 0)); return [p[0], p[1]]; };
+  const lines = readTransit(feed, toEnu, painted);
+  const trams: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }> = [];
+  const tramMeta: Array<{ n: string; d: number; h: number }> = [];
+  let tramNode = -1;
+  for (const line of lines.filter((l) => l.kind === "tram")) {
+    const s: number[] = [];
+    // one continuous 2 m sampling along the whole path (per-segment restarts left zero-length
+    // steps at the joints, which the viewer's safety filter cut into 20–80 m scraps)
+    const pts: Array<[number, number]> = [];
+    let carry = 0;
+    for (let i = 1; i < line.path.length; i++) {
+      const [ax, ay] = line.path[i - 1], [bx, by] = line.path[i], L = Math.hypot(bx - ax, by - ay);
+      if (L < 1e-3) continue;
+      for (let d = carry; d < L; d += 2) pts.push([ax + (bx - ax) * d / L, ay + (by - ay) * d / L]);
+      carry = (2 - ((L - carry) % 2)) % 2;
+    }
+    for (const [e, n] of pts) {
+      {
+        let z = ground(e, n), vis = z !== null ? 1 : 0;
+        if (z !== null && wet(e, n)) { // on the water only on a mapped bridge deck
+          const dz = decks.map((p) => deckHeight(p, e, n)).find((v) => v !== null);
+          if (dz === undefined || dz === null) vis = 0; else z = dz;
+        }
+        if (vis) for (const lift of [0, 1.6, 3.4]) {
+          const q: [number, number, number] = [e, n, z! + lift], [x, y] = enuToPixel(q);
+          await heights.ensure(x, y);
+          if (!roadSurfaceSafe(heights.at(x, y), enuHeight(q), lift === 0) || !paintedArt.has(key(Math.floor(x / CAMERA.tile), Math.floor(y / CAMERA.tile)))
+            || edgeDistance(x, y) < (EDGE0 + EDGE1) / 2 || paintedDistance(paintedArt, x, y, CAMERA.tile) < FEATHER * 0.75) { vis = 0; break; }
+        }
+        s.push(Math.round(e * 10) / 10, Math.round(n * 10) / 10, Math.round((z ?? 0) * 10) / 10, vis);
+      }
+    }
+    if (s.filter((v, i) => i % 4 === 3 && v).length < 50) continue; // under 100 m visible: skip
+    trams.push({ c: 2, o: 1, l: 1, w: 3, a: tramNode--, b: tramNode--, s });
+    tramMeta.push({ n: line.name, d: line.dir, h: line.headway });
+  }
+  // bus guides: only the stretches within ~300 m of the painted area (the viewer's road graph is
+  // limited to it anyway); a line leaving and re-entering gives several guides
+  const buses: Array<{ n: string; d: number; h: number; p: number[] }> = [];
+  for (const l of lines.filter((l) => l.kind === "bus")) {
+    const near = l.path.map(([e, n]) => painted(e, n));
+    const keepPt = near.map((_, i) => near.slice(Math.max(0, i - 30), i + 31).some(Boolean));
+    for (let i = 0; i < l.path.length;) {
+      if (!keepPt[i]) { i++; continue; }
+      let j = i; while (j < l.path.length && keepPt[j]) j++;
+      if (j - i >= 20) buses.push({ n: l.name, d: l.dir, h: l.headway, p: l.path.slice(i, j).flat() });
+      i = j;
+    }
+  }
+  writeData("transit", JSON.stringify({ licence: "CC BY-SA, Roma Servizi per la Mobilità (GTFS)", buses, trams: { meta: tramMeta, tracks: encodeRoads(trams) } }));
+  console.log(`  transit: ${buses.length} bus line-directions, ${tramMeta.length} tram line-directions through the painted area`);
 }
 
 /**
@@ -591,6 +664,15 @@ async function main() {
   if (from) state = readJson(from);
   console.log(`  ${activeRegion()}: ${from ? `changes since ${from === pendingFile() ? "the last (unpublished) export" : "the published state"}` : "no published state: building everything"}`);
   outlines = areas.map((a) => areaPolygon(AREAS[a].bbox));
+  {
+    // deepest point inside the union of outlines (coarse grid): the cloud band takes at most 35% of it
+    const pts = outlines.flat(), xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    let deepest = 0;
+    for (let x = Math.min(...xs); x <= Math.max(...xs); x += 256) for (let y = Math.min(...ys); y <= Math.max(...ys); y += 256) deepest = Math.max(deepest, edgeDistance(x, y));
+    EDGE0 = Math.round(Math.min(760, deepest * 0.1));
+    EDGE1 = EDGE0 + Math.round(Math.min(2600, deepest * 0.35));
+    console.log(`  cloud band: ${EDGE0}–${EDGE1} art px from the outline (deepest point ${Math.round(deepest)} px)`);
+  }
   const photo = new Map<Key, string>(), art = new Map<Key, string>();
   const attributions = new Set<string>();
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -608,6 +690,7 @@ async function main() {
       }
     }
   }
+  rendered = new Set(photo.keys());
   const playable = requestedBounds ?? paintedBounds(art.keys(), CAMERA.tile);
   if (!playable) throw new Error("no painted tiles: playable area cannot be exported");
   const coverage = (requestedBounds ? artCoverage : renderedCoverage)(playable, new Set(art.keys()), new Set(photo.keys()), CAMERA.tile);
@@ -618,6 +701,7 @@ async function main() {
   const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
   paintedArt = new Set(art.keys());
   await exportRoads(areas, heights);
+  await exportTransit(areas, heights);
   if (!args["data-only"]) {
     paintedArt = new Set(art.keys());
     await exportLayer("map", new Map([...photo, ...art])); // painted wins; unpainted fogged
@@ -647,7 +731,7 @@ async function main() {
     airport: REGIONS[activeRegion()].airport ?? null, areas: areas.map((a) => ({ id: a, title: AREAS[a]?.title })),
     layers: { photo: photo.size, art: art.size }, attributions: [...attributions],
     format: FORMAT,
-    files: { "tiles-map": dataFile("tiles-map"), "tiles-photo": dataFile("tiles-photo"), borders: dataFile("borders"), roads: dataFile("roads") },
+    files: { "tiles-map": dataFile("tiles-map"), "tiles-photo": dataFile("tiles-photo"), borders: dataFile("borders"), roads: dataFile("roads"), transit: dataFile("transit") },
     previews,
   }, null, 2);
   if (state.data["world.json"] !== hash(world)) {

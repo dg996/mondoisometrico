@@ -7,7 +7,7 @@
 
 import type { SceneBuilding } from "../src/building-shape.ts";
 type P2 = [number, number];
-export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
+export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0 }
 interface Objects { b: SceneBuilding[]; t: Array<[number, number, number, number]> }
 
 const FILL: Record<string, string> = {
@@ -22,6 +22,9 @@ const AREA_ORDER = ["residential", "commercial", "industrial", "campus", "farm",
 const BASE = "#d9d3c4";
 const SEA = "#2c80b2", SHALLOW = "#4ea6cb";
 const ASPHALT: Record<string, string> = { highway: "#6c7077", street: "#7b7e85", lane: "#8b8d91", dirtroad: "#c3ab82" };
+/** sampietrini (OSM surface=sett/cobblestone/paving_stones): warm dark basalt grey, no lane paint */
+const SETT = "#857b72";
+const roadColour = (f: Feature) => (f.s ? SETT : ASPHALT[f.k]);
 const PATHS: Record<string, string> = { path: "#ebe5d6", cycle: "#c98e6c", plaza: "#e6e0d4" };
 const SIDEWALK = "#e4ded2", KERB = "#c9c4b9";
 const SHADOW_DIR: P2 = [0.84, 0.54]; // away from the renderer's sun (-0.55, -0.35, 0.76)
@@ -105,9 +108,9 @@ export function drawGround(
   const rails = of("rail");
   const layers = [...new Set([...roads, ...rails].map((f) => f.y ?? 0))].sort((a, b) => a - b);
   const disks = (js: number[][], grow: number, c?: string) => {
-    for (const [x, y, r, , k] of js) {
+    for (const [x, y, r, , k, sett] of js) {
       ctx.beginPath(); ctx.arc(x, y, r - 3 + grow, 0, Math.PI * 2);
-      ctx.fillStyle = c ?? ASPHALT[CLASS[k] ?? "street"]; ctx.fill();
+      ctx.fillStyle = c ?? (sett ? SETT : ASPHALT[CLASS[k] ?? "street"]); ctx.fill();
     }
   };
   for (const layer of layers) {
@@ -119,13 +122,13 @@ export function drawGround(
       for (const f of rs) stroke(f.l!, f.w! + 3, "#55565c");
       for (const f of rs) stroke(f.l!, f.w! + 2.4, "#e2ddd2");
     }
-    const streets = rs.filter((f) => f.k === "street");
+    const streets = rs.filter((f) => f.k === "street" && f.sw !== 0);
     for (const f of streets) stroke(f.l!, f.w! + 6, KERB);
     const streetJs = layer === 0 ? js.filter((j) => CLASS[j[4]] === "street") : []; // pavements round street corners
     disks(streetJs, 3, KERB);
     for (const f of streets) stroke(f.l!, f.w! + 5.4, SIDEWALK);
     disks(streetJs, 2.7, SIDEWALK);
-    for (const f of rs) stroke(f.l!, f.w!, ASPHALT[f.k]);
+    for (const f of rs) stroke(f.l!, f.w!, roadColour(f));
     disks(js, 0);
     // 5. markings, kept out of junctions (lines of crossing roads would scribble over each other)
     ctx.save();
@@ -134,7 +137,7 @@ export function drawGround(
     for (const [x, y, r] of junctions) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2); }
     ctx.clip("evenodd");
     for (const f of rs) {
-      if (f.k !== "street" && f.k !== "highway") continue;
+      if ((f.k !== "street" && f.k !== "highway") || f.s) continue; // no lane paint on sampietrini
       const w = f.w!;
       if (f.k === "highway") { for (const s of [-1, 1]) stroke(offset(f.l!, s * (w / 2 - 0.5)), 0.15, "rgba(255,255,255,0.9)"); }
       const lanes = f.n ?? Math.max(1, Math.round(w / 3.3));
@@ -159,7 +162,26 @@ export function drawGround(
     ctx.lineCap = "butt";
   }
   ctx.setLineDash([]);
-  // zebra crossings: bars parallel to the street, across its full width
+  // OSM marked crossings: white bars along the crossing way (1 m pitch), each bar parallel to the street
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  for (const f of of("crossing")) {
+    const l = f.l!;
+    for (let k = 1; k < l.length; k++) {
+      const [ax, ay] = l[k - 1], [bx, by] = l[k], L = Math.hypot(bx - ax, by - ay);
+      if (L < 0.5) continue;
+      const dx = (bx - ax) / L, dy = (by - ay) / L, nx = -dy, ny = dx; // walk direction d, street direction n
+      for (let o = 0.5; o < L - 0.3; o += 1.0) {
+        const cx = ax + dx * o, cy = ay + dy * o;
+        ctx.beginPath();
+        ctx.moveTo(cx - nx * 1.5 - dx * 0.25, cy - ny * 1.5 - dy * 0.25);
+        ctx.lineTo(cx + nx * 1.5 - dx * 0.25, cy + ny * 1.5 - dy * 0.25);
+        ctx.lineTo(cx + nx * 1.5 + dx * 0.25, cy + ny * 1.5 + dy * 0.25);
+        ctx.lineTo(cx - nx * 1.5 + dx * 0.25, cy - ny * 1.5 + dy * 0.25);
+        ctx.fill();
+      }
+    }
+  }
+  // zebra crossings guessed where OSM maps none: bars parallel to the street, across its full width
   ctx.fillStyle = "rgba(255,255,255,0.92)";
   for (const [x, y, dx, dy, w] of zebras) {
     const nx = -dy, ny = dx;

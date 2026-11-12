@@ -13,7 +13,10 @@ import { roofRise, type SceneBuilding } from "../src/building-shape.ts";
 import { bridgeMesh } from "./bridges.ts";
 
 const params = new URLSearchParams(location.search);
-useRegion(params.get("region") ?? "roma-centro"); // before any projection below
+const REGION = params.get("region") ?? "roma-centro";
+useRegion(REGION); // before any projection below
+/** Rome: Roman facades, coppi roofs and Mediterranean trees; no solar heaters on the roofs. */
+const ROMA = REGION === "roma-centro";
 const SS = Number(params.get("ss") ?? 2); // supersampling
 const SIZE = CAMERA.tile * SS;
 const HEIGHT_SIZE = 256;
@@ -62,7 +65,7 @@ function ground(x: number, y: number): number {
 const waterPolygons = features.filter(f=>["water","sea","pool"].includes(f.k)&&f.r).map(f=>f.r!);
 for (const f of features.filter(f=>f.bridge && f.l && f.w)) {
   const profile = bridgeProfile(f.l!, (x,y)=>groundAt(meta,terrain,x,y), (x,y)=>inWater(x,y,waterPolygons));
-  if(profile) scene.add(bridgeMesh(profile,f.w!,["path","plaza","cycle"].includes(f.k)));
+  if(profile) scene.add(bridgeMesh(profile,f.w!,["path","plaza","cycle"].includes(f.k),f.k === "rail"));
 }
 
 const groundTexture = new THREE.CanvasTexture(document.createElement("canvas"));
@@ -150,7 +153,8 @@ export interface TileObjects {
   t: Array<[number, number, number, number]>;      // x, y, radius, crown height
 }
 
-/** wall, roof colours per style (see scene.ts): bauhaus, residential, public, tower, shed, modern */
+/** wall, roof colours per style (see scene.ts / roma-style.ts): bauhaus, residential, public, tower, shed,
+ * modern, then Rome: palazzo storico, palazzina novecento, travertino. OSM / scene colours override. */
 const PALETTE: Array<[number[], number[]]> = [
   [[0.97, 0.96, 0.93], [0.88, 0.87, 0.84]],
   [[0.94, 0.88, 0.76], [0.84, 0.82, 0.78]],
@@ -158,6 +162,9 @@ const PALETTE: Array<[number[], number[]]> = [
   [[0.66, 0.75, 0.82], [0.70, 0.72, 0.74]],
   [[0.78, 0.76, 0.72], [0.60, 0.60, 0.60]],
   [[0.86, 0.87, 0.88], [0.80, 0.80, 0.80]],
+  [[0.84, 0.63, 0.34], [0.72, 0.38, 0.25]],
+  [[0.91, 0.84, 0.71], [0.79, 0.74, 0.66]],
+  [[0.87, 0.83, 0.74], [0.68, 0.40, 0.27]],
 ];
 const SUN = new THREE.Vector3(-0.55, -0.35, 0.76).normalize();
 
@@ -166,15 +173,20 @@ const buildingMaterial = new THREE.ShaderMaterial({
     attribute vec3 color;
     attribute vec2 facade;   // (meters along wall, meters above ground); y = -1000: roof / rooftop object
     attribute float kind;    // style index
-    varying vec3 vColor; varying vec3 vNormal; varying vec2 vFacade; varying float vKind;
+    attribute float eave;    // wall height at the eaves (m above ground), for cornices
+    varying vec3 vColor; varying vec3 vNormal; varying vec2 vFacade; varying float vKind; varying float vEave;
     void main() {
-      vColor = color; vNormal = normal; vFacade = facade; vKind = kind;
+      vColor = color; vNormal = normal; vFacade = facade; vKind = kind; vEave = eave;
       gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
     }`,
   fragmentShader: /* glsl */ `
     uniform vec3 sun;
-    varying vec3 vColor; varying vec3 vNormal; varying vec2 vFacade; varying float vKind;
+    varying vec3 vColor; varying vec3 vNormal; varying vec2 vFacade; varying float vKind; varying float vEave;
     const vec3 GLASS = vec3(0.30, 0.40, 0.50);
+    const vec3 DARK = vec3(0.17, 0.17, 0.18);          // window opening
+    const vec3 PERSIANA = vec3(0.23, 0.34, 0.25);      // green shutters
+    const vec3 STUCCO = vec3(0.93, 0.89, 0.80);        // cornices, frames, string courses
+    float h21(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
     void main() {
       vec3 n = normalize(vNormal);
       float light = min(1.08, 0.80 + 0.32 * max(dot(n, sun), 0.0));
@@ -200,8 +212,41 @@ const buildingMaterial = new THREE.ShaderMaterial({
         } else if (k == 2) {     // public: tall sparse windows
           float col = fract(x / 4.5);
           if (fl > 0.25 && fl < 0.85 && col > 0.35 && col < 0.65) c = mix(c, GLASS, 0.6);
+        } else if (k == 6) {     // palazzo storico: 3.6 m floors, tall windows with shutters, cornice, dark base
+          float y = vFacade.y, f = fract(y / 3.6), col = fract(x / 3.4);
+          vec2 cell = vec2(floor(x / 3.4), floor(y / 3.6));
+          if (y > vEave - 0.9) {                       // cornicione
+            c = mix(c, STUCCO, 0.75);
+            if (y > vEave - 0.3) c *= 0.8;
+          } else if (y < 4.2) {                        // piano terra: darker plinth, arched doors / shops
+            c *= 0.76;
+            float g = fract(x / 5.2);
+            if (g > 0.28 && g < 0.72 && y < 3.3) c = vec3(0.24, 0.19, 0.16);
+          } else {
+            if (f < 0.05) c = mix(c, STUCCO, 0.45);   // marcapiano
+            bool closed = h21(cell) < 0.3;
+            if (f > 0.22 && f < 0.80) {
+              if (col > 0.38 && col < 0.62) c = closed ? PERSIANA : DARK;
+              else if (!closed && ((col > 0.27 && col < 0.38) || (col > 0.62 && col < 0.73))) c = PERSIANA;
+            }
+            if (f >= 0.80 && f < 0.87 && col > 0.30 && col < 0.70) c = mix(c, STUCCO, 0.65); // window head
+          }
+        } else if (k == 7) {     // palazzina novecento: wider windows, balcony bands, parapet
+          float y = vFacade.y, f = fract(y / 3.2), col = fract(x / 4.2);
+          if (y > vEave - 0.6) c = mix(c, STUCCO, 0.5);
+          else if (y < 3.4) c *= 0.8;
+          else {
+            if (f > 0.30 && f < 0.82 && col > 0.22 && col < 0.78) c = h21(vec2(floor(x / 4.2), floor(y / 3.2))) < 0.35 ? c * 0.72 : DARK * 1.3;
+            if (f < 0.14 && fract(x / 8.4) < 0.55) c = mix(c, STUCCO, 0.55); // balcony slab + parapet
+          }
+        } else if (k == 8) {     // travertino: stone courses, few tall openings, plinth
+          float y = vFacade.y, col = fract(x / 6.0);
+          c *= 0.95 + 0.05 * step(0.5, fract(y / 1.1));
+          if (y < 1.2) c *= 0.85;
+          if (y > 5.0 && y < vEave - 2.5 && col > 0.43 && col < 0.57 && fract(y / 7.0) > 0.25) c = mix(c, DARK, 0.75);
+          if (y > vEave - 0.8) c = mix(c, STUCCO, 0.6);
         }
-        if (ground && k != 3 && k != 4) c *= 0.84;  // shops / pilotis shade
+        if (ground && k != 3 && k != 4 && k < 6) c *= 0.84;  // shops / pilotis shade
       }
       gl_FragColor = vec4(c * light, 1.0);
     }`,
@@ -213,7 +258,7 @@ const buildingMaterial = new THREE.ShaderMaterial({
  * into real trees (style/trees.png). Weights are rough shares; palms only replace small crowns.
  * [name, weight, crown colour, crown scale xy, crown scale z, palm?]
  */
-const SPECIES: Array<[string, number, number[], number, number, boolean]> = [
+const TLV_SPECIES: Species[] = [
   ["ficus", 22, [0.16, 0.36, 0.14], 1, 0.85, false],
   ["tipuana", 13, [0.42, 0.62, 0.22], 1.05, 0.7, false],
   ["jacaranda", 9, [0.62, 0.5, 0.85], 1, 0.7, false],
@@ -224,6 +269,21 @@ const SPECIES: Array<[string, number, number[], number, number, boolean]> = [
   ["date palm", 14, [0.55, 0.62, 0.2], 0, 0, true],
   ["fan palm", 11, [0.32, 0.5, 0.2], 0, 0, true],
 ];
+/**
+ * Rome (style/trees-roma.png): stone pine (wide flat umbrella high on a bare trunk), London plane,
+ * holm oak, Italian cypress (narrow and tall), olive, a few palms. Colours are the placeholders the
+ * paint step reads; the 7th field lifts the crown on a visible trunk (fraction of the crown height).
+ */
+const ROMA_SPECIES: Species[] = [
+  ["stone pine", 24, [0.20, 0.38, 0.20], 1.55, 0.32, false, 1.0],
+  ["plane", 24, [0.44, 0.60, 0.26], 1.1, 0.85, false, 0.15],
+  ["holm oak", 20, [0.13, 0.27, 0.15], 0.95, 0.8, false, 0],
+  ["cypress", 10, [0.10, 0.24, 0.16], 0.32, 2.3, false, 0],
+  ["olive", 9, [0.58, 0.64, 0.52], 0.75, 0.65, false, 0],
+  ["date palm", 3, [0.55, 0.62, 0.2], 0, 0, true],
+];
+const SPECIES = ROMA ? ROMA_SPECIES : TLV_SPECIES;
+type Species = [string, number, number[], number, number, boolean, number?];
 const SPECIES_TOTAL = SPECIES.reduce((t, s) => t + s[1], 0);
 const rand = (x: number, y: number) => Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
 /** Mostly one species per ~40 m patch (streets are planted in runs), every 4th tree a random one. */
@@ -254,6 +314,23 @@ const treeMaterial = new THREE.ShaderMaterial({
   uniforms: { sun: { value: SUN } },
 });
 
+/** Crown with foliage lobes (a sphere bumped by smooth noise, flatter underneath), not a smooth ball:
+ *  each instance is also turned at random so neighbouring trees never repeat the same silhouette. */
+const LUMPY_CROWN = (() => {
+  const g = new THREE.IcosahedronGeometry(1, 3), p = g.attributes.position as THREE.BufferAttribute, v = new THREE.Vector3();
+  const bump = (x: number, y: number, z: number) =>
+    Math.sin(x * 3.1 + 1.3) * Math.sin(y * 2.7 + 0.4) * Math.sin(z * 3.3 + 2.1) * 0.6
+    + Math.sin(x * 6.3 + y * 5.1 + 0.7) * Math.sin(z * 5.7 + 1.9) * 0.4;
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const r = 1 + 0.16 * bump(v.x, v.y, v.z);
+    v.multiplyScalar(r);
+    if (v.z < -0.2) v.z = -0.2 + (v.z + 0.2) * 0.55; // flatter underside, as seen from 45°
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  return g;
+})();
 const objects = new THREE.Group();
 scene.add(objects);
 function pointInRing(x: number, y: number, ring: P2[]) {
@@ -268,7 +345,7 @@ function pointInRing(x: number, y: number, ring: P2[]) {
 function buildObjects(data: TileObjects) {
   objects.children.forEach((o: any) => o.geometry?.dispose());
   objects.clear();
-  const pos: number[] = [], nor: number[] = [], col: number[] = [], fac: number[] = [], tow: number[] = [];
+  const pos: number[] = [], nor: number[] = [], col: number[] = [], fac: number[] = [], tow: number[] = [], eav: number[] = [];
   /** axis-aligned box on a roof (rooftop clutter), no facade pattern */
   const box = (x: number, y: number, z: number, sx: number, sy: number, sz: number, c: number[]) => {
     const X = [x - sx / 2, x + sx / 2], Y = [y - sy / 2, y + sy / 2], Z = [z, z + sz];
@@ -280,7 +357,7 @@ function buildObjects(data: TileObjects) {
       [[[X[0], Y[1], Z[0]], [X[0], Y[0], Z[0]], [X[0], Y[0], Z[1]], [X[0], Y[1], Z[1]]], [-1, 0, 0]],
     ];
     for (const [q, nn] of faces) for (const v of [0, 1, 2, 0, 2, 3]) {
-      pos.push(...q[v]); nor.push(...nn); col.push(...c); fac.push(0, -1000); tow.push(0);
+      pos.push(...q[v]); nor.push(...nn); col.push(...c); fac.push(0, -1000); tow.push(0); eav.push(0);
     }
   };
   const rnd = (seed: number) => () => ((seed = Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x9e3779b9 | 0) >>> 0) / 2 ** 32;
@@ -294,7 +371,7 @@ function buildObjects(data: TileObjects) {
       ? [1,3,5].map(i=>parseInt(value.slice(i,i+2),16)/255) : fallback;
     const wall=color(detail.wallColor,palette[0]), roof=color(detail.roofColor,palette[1]);
     const isTower = style;
-    const surface = (p:P2)=>top+(roofHeight>0 ? roofRise(...p,ring,detail.roofShape??"flat",roofHeight,detail.roofDirection,detail.roofAcross) : 0);
+    const surface = (p:P2)=>top+(roofHeight>0 ? roofRise(...p,ring,detail.roofShape??"flat",roofHeight,detail.roofDirection,detail.roofAcross,detail.holes) : 0);
     const holes = (detail.holes??[]).map(r=>r.slice().reverse());
     for (const boundary of [ring,...holes]) {
     const outline = roofHeight>0 ? boundary.flatMap((a,i)=>{
@@ -311,7 +388,7 @@ function buildObjects(data: TileObjects) {
       const quad = [[ax, ay, g, along, -1], [bx, by, g, along + L, -1], [bx, by, zb, along + L, zb - g - 1], [ax, ay, za, along, za - g - 1]];
       for (const q of [0, 1, 2, 0, 2, 3]) {
         pos.push(quad[q][0], quad[q][1], quad[q][2]); nor.push(nx, ny, 0); col.push(...wall);
-        fac.push(quad[q][3], detail.part ? -1000 : quad[q][4]); tow.push(isTower);
+        fac.push(quad[q][3], detail.part && !ROMA ? -1000 : quad[q][4]); tow.push(isTower); eav.push(Math.min(za, zb) - g - 1);
       }
       along += L;
     }
@@ -320,18 +397,20 @@ function buildObjects(data: TileObjects) {
     const tris = THREE.ShapeUtils.triangulateShape(vec(ring), holes.map(vec));
     const vertices = [ring,...holes].flat();
     const triangle = (a:P2,b:P2,c:P2,depth:number) => {
-      if(roofHeight>0 && depth<4) {
+      // pitched roofs: split until every edge is < 1.2 m so hips and ridges come out straight, not stepped
+      const longest=Math.max(Math.hypot(a[0]-b[0],a[1]-b[1]),Math.hypot(b[0]-c[0],b[1]-c[1]),Math.hypot(c[0]-a[0],c[1]-a[1]));
+      if(roofHeight>0 && depth<9 && (depth<2 || longest>1.2)) {
         const mid=(p:P2,q:P2):P2=>[(p[0]+q[0])/2,(p[1]+q[1])/2];
         const ab=mid(a,b),bc=mid(b,c),ca=mid(c,a);
         triangle(a,ab,ca,depth+1);triangle(ab,b,bc,depth+1);triangle(ca,bc,c,depth+1);triangle(ab,bc,ca,depth+1);return;
       }
       const vs=[a,b,c].map(p=>new THREE.Vector3(p[0],p[1],surface(p)));
       const normal=new THREE.Vector3().subVectors(vs[1],vs[0]).cross(new THREE.Vector3().subVectors(vs[2],vs[0])).normalize();
-      for(const v of vs) {pos.push(v.x,v.y,v.z);nor.push(normal.x,normal.y,normal.z);col.push(...roof);fac.push(0,-1000);tow.push(0);}
+      for(const v of vs) {pos.push(v.x,v.y,v.z);nor.push(normal.x,normal.y,normal.z);col.push(...roof);fac.push(0,-1000);tow.push(0);eav.push(0);}
     };
     for(const t of tris) triangle(vertices[t[0]],vertices[t[1]],vertices[t[2]],0);
     // rooftop clutter on flat residential roofs: solar water heaters (panel + tank), AC units
-    if (style !== 2 && style !== 3 && style !== 4 && h > 6) {
+    if (!ROMA && style !== 2 && style !== 3 && style !== 4 && h > 6) {
       const xs = ring.map((p) => p[0]), ys = ring.map((p) => p[1]);
       const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
       const area = Math.abs(THREE.ShapeUtils.area(ring.map(([x, y]) => new THREE.Vector2(x, y))));
@@ -360,14 +439,16 @@ function buildObjects(data: TileObjects) {
     geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
     geo.setAttribute("facade", new THREE.Float32BufferAttribute(fac, 2));
     geo.setAttribute("kind", new THREE.Float32BufferAttribute(tow, 1));
+    geo.setAttribute("eave", new THREE.Float32BufferAttribute(eav, 1));
     objects.add(new THREE.Mesh(geo, buildingMaterial));
   }
   if (data.t.length) {
-    const crowns = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 2), treeMaterial, data.t.length);
+    const crowns = new THREE.InstancedMesh(LUMPY_CROWN, treeMaterial, data.t.length);
     const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 6).rotateX(Math.PI / 2).translate(0, 0, 0.5), treeMaterial, data.t.length);
     const m = new THREE.Matrix4(), c = new THREE.Color(), bark = new THREE.Color(0.45, 0.36, 0.28);
+    const yaw = (x: number, y: number) => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), rand(x * 0.7, y * 1.3) * Math.PI * 2);
     data.t.forEach(([x, y, r, ch], i) => {
-      const g = ground(x, y), [name, , col, sxy, sz, palm] = species(x, y, r);
+      const g = ground(x, y), [name, , col, sxy, sz, palm, lift = 0] = species(x, y, r);
       if (palm) {
         // small star crown high on a thin trunk
         const top = g + Math.max(ch, 8) + (name === "fan palm" ? 6 : 0); // Washingtonias tower over the rest
@@ -375,8 +456,17 @@ function buildObjects(data: TileObjects) {
         crowns.setMatrixAt(i, m);
         m.makeScale(0.4, 0.4, top - g).setPosition(x, y, g);
         trunks.setMatrixAt(i, m);
+      } else if (lift > 0) {
+        // stone pine: flat umbrella on a tall bare trunk (taller than the plain crown height)
+        const top = g + ch + r * sz * 0.5 + lift * Math.max(3, ch * 0.45);
+        m.compose(new THREE.Vector3(x, y, top), yaw(x, y), new THREE.Vector3(r * sxy, r * sxy, r * sz));
+        crowns.setMatrixAt(i, m);
+        m.makeScale(0.35 + r * 0.04, 0.35 + r * 0.04, top - g - r * sz * 0.6).setPosition(x, y, g);
+        trunks.setMatrixAt(i, m);
       } else {
-        m.makeScale(r * sxy, r * sxy, r * sz).setPosition(x, y, g + ch);
+        // cypress: its tall narrow spindle stands on the ground, not floating at crown height
+        const z = sz > 1.5 ? g + r * sz : g + ch;
+        m.compose(new THREE.Vector3(x, y, z), yaw(x, y), new THREE.Vector3(r * sxy, r * sxy, r * sz));
         crowns.setMatrixAt(i, m);
         m.makeScale(0, 0, 0);
         trunks.setMatrixAt(i, m);

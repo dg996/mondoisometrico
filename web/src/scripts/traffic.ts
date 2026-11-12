@@ -18,6 +18,12 @@ export interface Road {
 
 type Vec3 = [number, number, number];
 
+/** A real bus line stretch (GTFS, CC BY-SA): ENU guide path every ~10 m and headway in seconds. */
+export interface BusLine { n: string; d: number; h: number; p: number[] }
+
+/** Line guide with a 25 m grid of its points for "how far is this from the route" queries. */
+interface Guide { line: BusLine; xy: Float32Array; grid: Map<string, number[]>; night: boolean }
+
 interface Way { r: Road; n: number; cum: Float32Array; len: number; w: number }
 interface Vehicle {
   id: number;
@@ -30,6 +36,8 @@ interface Vehicle {
   holding: number;    // junction node this vehicle is inside (-1 none)
   next: { w: number; dir: 1 | -1 } | null; // way chosen for after this one
   len: number; wid: number; hei: number; color: [number, number, number]; bus: boolean;
+  /** index into Traffic.guides when this bus runs a real line, else -1 */
+  line: number;
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -41,6 +49,9 @@ const CAR_COLORS: Array<[number, number, number]> = [
   [40, 80, 150], [235, 190, 40], [120, 130, 140], [210, 210, 214],
 ];
 const BUS_COLORS: Array<[number, number, number]> = [[40, 110, 190], [30, 150, 90], [220, 220, 222]];
+/** ATAC fleet: mostly red, some white/grey (illustrative livery, not per vehicle) */
+const ATAC_COLORS: Array<[number, number, number]> = [[178, 34, 42], [178, 34, 42], [178, 34, 42], [222, 222, 220]];
+const GUIDE_CELL = 25, OFF_ROUTE = 16, BUS_SPEED = 6; // m, m, m/s average incl. stops
 
 export class Traffic {
   private ways: Way[] = [];
@@ -57,8 +68,13 @@ export class Traffic {
   private rand = mulberry(7);
   /** vehicles drawn in the last frame (debug / tests) */
   drawn = 0;
+  private guides: Guide[] = [];
+  /** 25 m grid of way samples [way, sample] (built on demand for placing line buses) */
+  private sampleGrid: Map<string, number[]> | null = null;
+  /** minutes since midnight of the simulated clock (ambient.ts): day lines by day, night lines by night */
+  clock: () => number = () => 12 * 60;
 
-  constructor(roads: Road[], private enu2px: number[][], private camFwd: [number, number], density = 1) {
+  constructor(roads: Road[], private enu2px: number[][], private camFwd: [number, number], density = 1, lines: BusLine[] = []) {
     for (const r of roads) {
       const n = r.s.length / 4;
       if (n < 2 || !Number.isInteger(n) || r.s.some((v) => !Number.isFinite(v))) continue;
@@ -86,7 +102,7 @@ export class Traffic {
       while (pick > weights[w] && w < weights.length - 1) pick -= weights[w++];
       const way = this.ways[w];
       const dir: 1 | -1 = way.r.o === 1 ? 1 : way.r.o === -1 ? -1 : this.rand() < 0.5 ? 1 : -1;
-      const bus = way.r.c <= 2 && this.rand() < 0.08;
+      const bus = !lines.length && way.r.c <= 2 && this.rand() < 0.08; // real lines replace random buses
       const len = bus ? 13.5 : 5.6 + this.rand() * 0.7;
       if (way.len < len + 4) continue;
       // skip ways that are mostly occluded / water-hidden (cars must not spawn in the river)
@@ -98,7 +114,7 @@ export class Traffic {
       const group = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
       if (group.some((o) => Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
       const v: Vehicle = {
-        id: i++, w, dir, s, lane, bus, len, stuck: 0, through: false, holding: -1, next: null,
+        id: i++, w, dir, s, lane, bus, len, stuck: 0, through: false, holding: -1, next: null, line: -1,
         cruise: 0.8 + this.rand() * 0.35, phase: this.rand() * Math.PI * 2, v: 0,
         wid: bus ? 2.7 : 2.15, hei: bus ? 3.2 : 1.65,
         color: bus ? BUS_COLORS[Math.floor(this.rand() * BUS_COLORS.length)] : CAR_COLORS[Math.floor(this.rand() * CAR_COLORS.length)],
@@ -108,9 +124,96 @@ export class Traffic {
       group.push(v);
       this.lanes.set(`${w}:${dir}:${lane}`, group);
     }
+    if (lines.length) { this.spawnLines(lines); this.regroup(); }
   }
 
   get count() { return this.vehicles.length; }
+
+  /** Buses on the real lines: as many per line stretch as its headway allows (≥ 1 when it runs). */
+  private spawnLines(lines: BusLine[]) {
+    for (const line of lines) {
+      const xy = Float32Array.from(line.p), grid = new Map<string, number[]>();
+      for (let i = 0; i < xy.length / 2; i++) {
+        const k = `${Math.floor(xy[i * 2] / GUIDE_CELL)}_${Math.floor(xy[i * 2 + 1] / GUIDE_CELL)}`;
+        (grid.get(k) ?? grid.set(k, []).get(k)!).push(i);
+      }
+      const g = this.guides.push({ line, xy, grid, night: /^n/i.test(line.n) }) - 1;
+      const length = (xy.length / 2) * 10;
+      const want = Math.max(1, Math.min(6, Math.round(length / (line.h * BUS_SPEED))));
+      for (let k = 0; k < want; k++) this.placeOnLine(g, k / want);
+    }
+  }
+
+  /** Nearest guide point (index, distance) to an ENU point, searching the 3×3 cells around it. */
+  private nearest(g: Guide, x: number, y: number) {
+    let best = -1, d = Infinity;
+    const cx = Math.floor(x / GUIDE_CELL), cy = Math.floor(y / GUIDE_CELL);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++)
+      for (const p of g.grid.get(`${cx + i}_${cy + j}`) ?? []) {
+        const e = Math.hypot(g.xy[p * 2] - x, g.xy[p * 2 + 1] - y);
+        if (e < d) { d = e; best = p; }
+      }
+    return { i: best, d };
+  }
+
+  /** A way + direction lying on the guide around fraction `f` of its length (or anywhere on it). */
+  private placeOnLine(g: number, f: number, existing?: Vehicle) {
+    const guide = this.guides[g], n = guide.xy.length / 2;
+    for (let tries = 0; tries < 30; tries++) {
+      const at = Math.min(n - 2, Math.floor(((f + tries * 0.137) % 1) * (n - 1)));
+      const x = guide.xy[at * 2], y = guide.xy[at * 2 + 1], fx = guide.xy[at * 2 + 2] - x, fy = guide.xy[at * 2 + 3] - y;
+      // the drawn way closest to this guide point, travelled in the line's direction
+      let pick: { w: number; dir: 1 | -1; s: number } | null = null, pd = 8;
+      if (!this.sampleGrid) {
+        this.sampleGrid = new Map();
+        this.ways.forEach((way, w) => { for (let k = 0; k < way.n - 1; k++) {
+          const c = `${Math.floor(way.r.s[k * 4] / GUIDE_CELL)}_${Math.floor(way.r.s[k * 4 + 1] / GUIDE_CELL)}`;
+          (this.sampleGrid!.get(c) ?? this.sampleGrid!.set(c, []).get(c)!).push(w, k);
+        } });
+      }
+      const cx = Math.floor(x / GUIDE_CELL), cy = Math.floor(y / GUIDE_CELL), cand: number[] = [];
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) cand.push(...(this.sampleGrid.get(`${cx + i}_${cy + j}`) ?? []));
+      for (let c = 0; c < cand.length; c += 2) {
+        const w = cand[c], way = this.ways[w], S = way.r.s;
+        if (way.r.c > 4 || this.wayVisible(way) < 0.55) continue;
+        { const k = cand[c + 1];
+          const d = Math.hypot(S[k * 4] - x, S[k * 4 + 1] - y);
+          if (d >= pd) continue;
+          const dx = S[k * 4 + 4] - S[k * 4], dy = S[k * 4 + 5] - S[k * 4 + 1];
+          const dir: 1 | -1 = dx * fx + dy * fy >= 0 ? 1 : -1;
+          if ((way.r.o === 1 && dir === -1) || (way.r.o === -1 && dir === 1)) continue;
+          pd = d; pick = { w, dir, s: dir === 1 ? way.cum[k] : way.len - way.cum[k] };
+        }
+      }
+      if (!pick) continue;
+      const len = 12, way = this.ways[pick.w];
+      const s = Math.max(len / 2 + 1, Math.min(way.len - len / 2 - 1, pick.s));
+      if (way.len < len + 4 || !this.sampleVisible(way, s, pick.dir, len)) continue;
+      const lane = 0, group = this.lanes.get(`${pick.w}:${pick.dir}:${lane}`) ?? [];
+      if (group.some((o) => o !== existing && Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
+      if (existing) {
+        this.release(existing);
+        Object.assign(existing, { w: pick.w, dir: pick.dir, s, v: 0, next: null, stuck: 0, through: false });
+        return true;
+      }
+      const v: Vehicle = {
+        id: this.vehicles.length, w: pick.w, dir: pick.dir, s, lane, bus: true, len, line: g,
+        stuck: 0, through: false, holding: -1, next: null, cruise: 0.85 + this.rand() * 0.2, phase: this.rand() * Math.PI * 2, v: 0,
+        wid: 2.55, hei: 3.1, color: ATAC_COLORS[Math.floor(this.rand() * ATAC_COLORS.length)],
+      };
+      this.vehicles.push(v);
+      group.push(v);
+      this.lanes.set(`${pick.w}:${pick.dir}:${lane}`, group);
+      return true;
+    }
+    return false;
+  }
+
+  /** Does this line run at the simulated hour? Night lines (n…) 0:30–5:30, the others 5:30–24:30. */
+  private lineRuns(g: number) {
+    const m = this.clock(), night = m >= 30 && m < 330;
+    return this.guides[g].night ? night : !night;
+  }
 
   private link(node: number, e: { w: number; dir: 1 | -1 }) {
     if (!this.out.has(node)) this.out.set(node, []);
@@ -165,6 +268,18 @@ export class Traffic {
     // Never route onto mostly-hidden / river-dipped ways (cars would sit in water or float).
     const drivable = options.filter((o) => this.wayVisible(this.ways[o.w]) >= 0.55
       && this.sampleVisible(this.ways[o.w], v.len / 2, o.dir, v.len));
+    if (v.line >= 0) { // real line: the option that stays closest to the route 20 m in
+      const g = this.guides[v.line];
+      let best: { w: number; dir: 1 | -1 } | null = null, bd = OFF_ROUTE;
+      for (const o of drivable) {
+        const way = this.ways[o.w], S = way.r.s, at = Math.min(20, way.len);
+        let i = 1; const sAt = o.dir === 1 ? at : way.len - at;
+        while (i < way.n - 1 && way.cum[i] < sAt) i++;
+        const d = this.nearest(g, S[i * 4], S[i * 4 + 1]).d;
+        if (d < bd) { bd = d; best = o; }
+      }
+      return best; // null: the line leaves the drawn graph here -> the bus is put back on its line
+    }
     const pool = (v.bus ? drivable.filter((o) => this.ways[o.w].r.c <= 3) : drivable);
     const from = pool.length ? pool : drivable;
     if (!from.length) return null;
@@ -222,7 +337,7 @@ export class Traffic {
         const v = g[k], way = this.ways[v.w];
         if (v.next === null) v.next = this.chooseNext(v);
         let target = this.limit(v);
-        if (v.stuck > 55) { this.respawn(v); continue; } // gridlock escape (was 25s — too twitchy on dense centro)
+        if (v.stuck > 55) { if (v.line >= 0) this.placeOnLine(v.line, this.rand(), v); else this.respawn(v); continue; } // gridlock escape
         // car following: stay a safe gap behind the vehicle ahead in this lane
         const lead = g[k + 1];
         if (lead) {
@@ -249,8 +364,9 @@ export class Traffic {
     for (const v of this.vehicles) {
       let way = this.ways[v.w];
       if (v.s + v.len / 2 < way.len) continue;
-      if (!v.next) { // dead end
-        if (way.r.o === 0) { v.dir = v.dir === 1 ? -1 : 1; v.s = v.len / 2; v.through = false; }
+      if (!v.next) { // dead end (or a line bus at the end of its drawn route)
+        if (v.line >= 0) this.placeOnLine(v.line, this.rand(), v);
+        else if (way.r.o === 0) { v.dir = v.dir === 1 ? -1 : 1; v.s = v.len / 2; v.through = false; }
         else this.respawn(v);
         continue;
       }
@@ -307,6 +423,7 @@ export class Traffic {
         while (i < way.n - 1 && way.cum[i] < s) i++;
         return { i, s };
       };
+      if (v.line >= 0 && !this.lineRuns(v.line)) continue; // night lines by night, day lines by day
       if (!this.sampleVisible(way, v.s, v.dir, v.len)) continue;
       const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
       const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
@@ -330,7 +447,19 @@ export class Traffic {
     }
     items.sort((a, b) => b.depth - a.depth); // back to front
     this.drawn = items.length;
-    for (const { v, c, d } of items) this.box(ctx, proj, c, d, v);
+    for (const { v, c, d } of items) {
+      this.box(ctx, proj, c, d, v);
+      // line number on the roof once a bus is big enough to read
+      if (v.line >= 0 && px >= 1.1) {
+        const [sx, sy] = proj([c[0], c[1], c[2] + v.hei + 0.3]);
+        const label = this.guides[v.line].line.n.toUpperCase();
+        ctx.font = `700 ${Math.round(Math.min(14, 6 + px * 3))}px ui-sans-serif, system-ui, sans-serif`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        const w = ctx.measureText(label).width + 6;
+        ctx.globalAlpha = 0.9; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
+        ctx.globalAlpha = 1; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
+      }
+    }
   }
 
   private box(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number], v: Vehicle) {

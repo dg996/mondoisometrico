@@ -17,7 +17,9 @@ import { openArea } from "./areas.ts";
 import { camera, ecefToEnu, llhToEcef } from "./camera.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
 import { SEA_H } from "./heights.ts";
-import { ROAD, isOneway, roadWidth } from "./roadspec.ts";
+import { ROAD, belowSurface, isOneway, roadWidth, wayLength } from "./roadspec.ts";
+import { existsSync } from "node:fs";
+import type { CtrnUnit } from "./ctrn.ts";
 
 type P2 = [number, number];
 /** Geoid undulation: orthometric (MSL) + this = ellipsoid height (= sea level). */
@@ -30,7 +32,7 @@ const R_EARTH = 6371000;
  * k: kind (drawn by page/renderer.ts), r: polygon rings (even-odd) or l: polyline,
  * w: line width (m), o: one-way, n: lanes, y: layer (bridges above)
  */
-export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][] }
+export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0 }
 
 const name = process.argv[2] ?? "roma-core";
 const area = openArea(name);
@@ -146,37 +148,113 @@ function areaKind(t: Record<string, string>): string | null {
 }
 
 const osm = readJson(join(RAW, name, "ground.json"));
+
+// Rome: street widths from the surveyed building fronts (Regione Lazio CTRN volumes). OSM lanes count
+// only moving lanes, so Via del Corso / Via Nazionale came out 12 m wide between façades 20–32 m apart
+// and the rest read as empty ground. Where a street has buildings on BOTH sides, the carriageway grows
+// to the façade gap minus the pavements (never narrower than OSM, never more than 2.2× OSM).
+const facadeSegs = new Map<string, number[][]>(), FCELL = 30;
+if (area.region === "roma-centro" && existsSync(join(RAW, "ctrn", "units.json"))) {
+  const [S0, W0, N0, E0] = bb;
+  for (const u of readJson<CtrnUnit[]>(join(RAW, "ctrn", "units.json"))) {
+    if (!u.r.some(([lo, la]) => la > S0 && la < N0 && lo > W0 && lo < E0)) continue;
+    const p = u.r.map(([lo, la]) => toEnu(lo, la));
+    for (let k = 1; k < p.length; k++) {
+      const sg = [p[k - 1][0], p[k - 1][1], p[k][0], p[k][1]];
+      for (let gx = Math.floor(Math.min(sg[0], sg[2]) / FCELL); gx <= Math.floor(Math.max(sg[0], sg[2]) / FCELL); gx++)
+        for (let gy = Math.floor(Math.min(sg[1], sg[3]) / FCELL); gy <= Math.floor(Math.max(sg[1], sg[3]) / FCELL); gy++)
+          (facadeSegs.get(`${gx}_${gy}`) ?? facadeSegs.set(`${gx}_${gy}`, []).get(`${gx}_${gy}`)!).push(sg);
+    }
+  }
+}
+/** Distance along a ray to the nearest surveyed building edge (≤ 40 m), else Infinity. */
+function facade(px: number, py: number, dx: number, dy: number) {
+  let best = Infinity;
+  for (let t = 0; t <= 40; t += FCELL / 2) for (const s of facadeSegs.get(`${Math.floor((px + dx * t) / FCELL)}_${Math.floor((py + dy * t) / FCELL)}`) ?? []) {
+    const ex = s[2] - s[0], ey = s[3] - s[1], den = dx * ey - dy * ex;
+    if (Math.abs(den) < 1e-9) continue;
+    const tt = ((s[0] - px) * ey - (s[1] - py) * ex) / den, u = ((s[0] - px) * dy - (s[1] - py) * dx) / den;
+    if (tt > 0 && tt <= 40 && u >= 0 && u <= 1) best = Math.min(best, tt);
+  }
+  return best;
+}
+/** Median façade-to-façade gap along a street (segments with buildings on both sides only). */
+function facadeGap(g: P2[]): number | null {
+  if (!facadeSegs.size) return null;
+  const gaps: number[] = [];
+  for (let k = 1; k < g.length; k++) {
+    const L = Math.hypot(g[k][0] - g[k - 1][0], g[k][1] - g[k - 1][1]);
+    for (let d = 4; d < L - 2; d += 12) {
+      const f = d / L, cx = g[k - 1][0] + (g[k][0] - g[k - 1][0]) * f, cy = g[k - 1][1] + (g[k][1] - g[k - 1][1]) * f;
+      const nx = -(g[k][1] - g[k - 1][1]) / L, ny = (g[k][0] - g[k - 1][0]) / L;
+      const a = facade(cx, cy, nx, ny), b = facade(cx, cy, -nx, -ny);
+      if (a + b < 45) gaps.push(a + b);
+    }
+  }
+  return gaps.length >= 2 ? gaps.sort((x, y) => x - y)[Math.floor(gaps.length / 2)] : null;
+}
+let widened = 0;
 const features: Feature[] = [];
 const water: P2[][][] = [];
 const coast: P2[][] = [];
 /** road node id -> how many road ways use it (2+ = junction), widest road there */
-const nodeUse = new Map<number, { n: number; w: number; foot: boolean; y: number; k: string }>();
+const nodeUse = new Map<number, { n: number; w: number; foot: boolean; y: number; k: string; s?: boolean }>();
 const footNodes = new Set<number>();
+let crossings = 0;
 const nodePos = new Map<number, [P2, P2, number]>(); // position, a neighbour along the road, road width
 const geom = (g: Array<{ lat: number; lon: number }>) => g.map((q) => toEnu(q.lon, q.lat));
+let hidden = 0;
 
 for (const el of osm.elements) {
   const t: Record<string, string> = el.tags ?? {};
   if (t.natural === "coastline" && el.geometry) { coast.push(geom(el.geometry)); continue; }
+  // metro, underpasses, station corridors, covered galleries: not on the open surface
+  if ((t.highway || t.railway || t["area:highway"]) && belowSurface(t, el.geometry ? wayLength(el.geometry) : Infinity)) { hidden++; continue; }
   let rings: P2[][] | null = null;
   if (el.type === "way" && el.geometry) {
     const g = geom(el.geometry);
     if (closed(g) && !(t.highway && t.area !== "yes") && !t.railway) rings = [g];
     else if (t.highway || t.railway || ["breakwater", "groyne", "pier"].includes(t.man_made)) {
+      if (t.railway && !/^(rail|light_rail|tram|narrow_gauge)$/.test(t.railway)) continue; // platforms, abandoned
       const l = simplifyLine(g, 0.3);
       const layer = Number(t.layer) || (t.bridge && t.bridge !== "no" ? 1 : 0);
-      if (t.railway) { features.push({ k: "rail", l, ...(layer > 0 ? { y: layer } : {}) }); continue; }
+      // rail bridges (Tiber, Ponte dell'Industria, viaducts) get a deck like road bridges; before, the
+      // tracks were painted flat across the water
+      if (t.railway) {
+        const railBridge = !!t.bridge && t.bridge !== "no";
+        features.push({ k: "rail", l: railBridge ? g : l, ...(layer > 0 ? { y: layer } : {}), ...(railBridge ? { id: el.id, bridge: true, w: 3.6 * Math.max(1, Number(t.tracks) || 1) + 1.2 } : {}) });
+        continue;
+      }
       if (t.man_made) { features.push({ k: "pier", l, w: Number(t.width) || 4 }); continue; }
       const road = ROAD[t.highway], path = PATH[t.highway];
       if (!road && !path) continue;
+      // OSM marked crossings (footway=crossing): drawn as real zebra stripes over the asphalt
+      if (t.footway === "crossing") {
+        const marked = !["unmarked", "no", "informal"].includes(t.crossing ?? "") && t["crossing:markings"] !== "no";
+        if (marked) { features.push({ k: "crossing", l: g }); crossings++; continue; }
+      }
+      // sampietrini / cobbles (OSM surface) and pavements (OSM sidewalk tags; separately mapped
+      // footway=sidewalk ways are drawn as paths, so the street gets no second pavement)
+      const sett = /^(sett|cobblestone|unhewn_cobblestone|paving_stones)$/.test(t.surface ?? "");
+      const sidewalkTag = t.sidewalk ?? t["sidewalk:both"];
+      const noSidewalk = /^(no|none|separate)$/.test(sidewalkTag ?? "")
+        || (!sidewalkTag && sett && /^(residential|living_street|service|unclassified|pedestrian)$/.test(t.highway)); // Roman vicoli in sampietrini
       const oneway = isOneway(t);
       const lanes = Number(t.lanes) || 0;
-      const w = road ? roadWidth(t) : Number(String(t.width).replace(",", ".")) || path;
+      let w = road ? roadWidth(t) : Number(String(t.width).replace(",", ".")) || path;
+      // explicit OSM width wins; otherwise fit the street between the surveyed façades
+      if (road && !t.width && !(t.bridge && t.bridge !== "no") && ["primary", "secondary", "tertiary", "unclassified", "residential", "living_street"].includes(t.highway)) {
+        const gap = facadeGap(g);
+        if (gap) {
+          const fit = Math.min(gap - (road[1] && !noSidewalk ? 5.4 : 1), w * 2.2);
+          if (fit > w + 0.5) { w = fit; widened++; }
+        }
+      }
       const kind = road ? (road[1] ? "street" : t.highway.startsWith("motorway") || t.highway.startsWith("trunk") ? "highway" : t.highway === "track" ? "dirtroad" : "lane") : t.highway === "cycleway" ? "cycle" : t.highway === "pedestrian" ? "plaza" : "path";
       if (road && el.nodes) for (const id of el.nodes) {
         const nd = nodeUse.get(id) ?? { n: 0, w: 0, foot: false, y: 0, k: kind };
         nd.n++; nd.y = Math.max(nd.y, layer);
-        if (w > nd.w) { nd.w = w; nd.k = kind; }
+        if (w > nd.w) { nd.w = w; nd.k = kind; nd.s = sett; }
         nodeUse.set(id, nd);
       } else if (path && el.nodes && t.highway !== "steps") for (const id of el.nodes) footNodes.add(id);
       if (road && el.nodes) el.geometry.forEach((q: any, k: number) => nodePos.set(el.nodes[k], [toEnu(q.lon, q.lat), k > 0 ? toEnu(el.geometry[k - 1].lon, el.geometry[k - 1].lat) : toEnu(el.geometry[k + 1].lon, el.geometry[k + 1].lat), w]));
@@ -184,6 +262,8 @@ for (const el of osm.elements) {
       if (oneway) f.o = 1;
       if (lanes) f.n = lanes;
       if (layer > 0) f.y = layer;
+      if (road && sett) f.s = 1;
+      if (road && noSidewalk) f.sw = 0;
       features.push(f);
       continue;
     }
@@ -210,14 +290,17 @@ for (const [id, u] of nodeUse) {
   const pos = nodePos.get(id);
   if (!pos) continue;
   const [[x, y], [nx, ny], w] = pos;
-  if (u.n >= 2) junctions.push([r1(x), r1(y), r1(u.w / 2 + 3), u.y, JUNCTION_KIND.indexOf(u.k)]);
+  if (u.n >= 2) junctions.push([r1(x), r1(y), r1(u.w / 2 + 3), u.y, JUNCTION_KIND.indexOf(u.k), u.s ? 1 : 0]);
   else if (footNodes.has(id) && w >= 5) {
     const L = Math.hypot(nx - x, ny - y) || 1;
     zebras.push([r1(x), r1(y), Math.round(((nx - x) / L) * 1000) / 1000, Math.round(((ny - y) / L) * 1000) / 1000, r1(w)]);
   }
 }
-features.push({ k: "junctions", j: junctions } as Feature, { k: "zebras", j: zebras } as Feature);
-console.log(`  ${junctions.length} junctions, ${zebras.length} zebra crossings`);
+// zebras guessed from footpaths meeting a street only where OSM has no mapped crossings at all
+features.push({ k: "junctions", j: junctions } as Feature, { k: "zebras", j: crossings ? [] : zebras } as Feature);
+console.log(`  ${hidden} ways below the surface left out (tunnels, covered, indoor, negative layer)`);
+if (facadeSegs.size) console.log(`  ${widened} streets widened to the surveyed façade gap (CTRN)`);
+console.log(`  ${junctions.length} junctions, ${crossings ? `${crossings} OSM marked crossings` : `${zebras.length} guessed zebra crossings`}`);
 
 // Sea: the coastline has land on its left. Join it, close the open chain far offshore (west).
 const chains = joinWays(coast);

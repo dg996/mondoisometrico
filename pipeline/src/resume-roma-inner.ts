@@ -31,10 +31,10 @@ function preflight() {
   need(join(base, "render"), "render tiles are required before paint/export");
   need(join(base, "height"), "height passes are required for traffic, landmarks and paint QA");
   need(join(RAW, AREA, "roads.json"), "OSM roads are required for safe traffic export");
-  const windows = count(join(base, "windows"), /^-?\d+_-?\d+\.png$/);
-  const painted = count(join(base, "paint"), /^-?\d+_-?\d+\.png$/);
-  const render = count(join(base, "render"), /^-?\d+_-?\d+\.png$/);
-  const height = count(join(base, "height"), /^-?\d+_-?\d+\.png$/);
+  const windows = count(join(base, "windows"), /^-?\d+_-?\d+\.(png|webp)$/);
+  const painted = count(join(base, "paint"), /^-?\d+_-?\d+\.(png|webp)$/);
+  const render = count(join(base, "render"), /^-?\d+_-?\d+\.(png|webp)$/);
+  const height = count(join(base, "height"), /^-?\d+_-?\d+\.(png|webp)$/);
   console.log(`${AREA}: render=${render} height=${height} windows=${windows} assembledPaint=${painted}`);
   console.log(`cache=${existsSync(join(WEB_CACHE, "regions")) ? "present" : "empty"} state=${existsSync(WEB_STATE) ? "present" : "empty"}`);
   if (process.env.MONDO_SOFT_PALETTE === "1")

@@ -84,6 +84,30 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			// a deep link (#@x,y,z, #metro, ?at=) opens somewhere else: no preview
 			if (/^#(@|metro)/.test(location.hash) || new URLSearchParams(location.search).has("at")) document.getElementById("preview")?.remove();
 		</script>
+		<!-- light of the hour and weather over the tiles (ambient.ts): multiply tint + soft wash, never repainting -->
+		<div id="ambient-tint" aria-hidden="true"></div>
+		<div id="ambient-wash" aria-hidden="true"></div>
+		<div id="ambient" class="ui" role="group" aria-label="Ora e meteo">
+			<div class="row">
+				<button type="button" id="ambient-play" aria-label="Fai scorrere il giorno">▶</button>
+				<input type="range" id="ambient-time" min="0" max="1439" step="1" aria-label="Ora del giorno" />
+				<span id="ambient-clock">--:--</span>
+				<button type="button" id="ambient-live" title="Torna all'ora reale di Roma">ora reale</button>
+			</div>
+			<div class="row meta">
+				<span id="ambient-weather">Meteo…</span>
+				<button type="button" id="help-toggle" aria-expanded="false" aria-controls="help" title="Aiuto">?</button>
+			</div>
+			<div id="help" hidden>
+				<p>Roma disegnata da open data e dipinta con AI. Le zone dipinte crescono a ogni aggiornamento; fuori, la città resta sfocata tra le nuvole.</p>
+				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Luce e meteo seguono l'ora e il tempo reali di Roma.</p>
+				<p class="keys"><b>H</b> nascondi comandi · <b>T</b> traffico · <b>P</b> foto/dipinto · <b>B</b> confini · <b>V</b> modalità video</p>
+			</div>
+		</div>
+		<div id="zoom" class="ui" role="group" aria-label="Zoom">
+			<button type="button" id="zoom-in" aria-label="Avvicina" title="Avvicina">+</button>
+			<button type="button" id="zoom-out" aria-label="Allontana" title="Allontana">−</button>
+		</div>
 		<footer id="credits"></footer>
 		<!-- video mode (?video or V): big credit line above the area social apps cover with their UI -->
 		<div id="video-credit">{region.credits.map((line, i) => <>{i > 0 && <br />}{line}</>)}</div>
@@ -94,6 +118,33 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			/* the map owns every gesture: no browser pan/pinch/double-tap zoom of the page, no long-press callout */
 			#map { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 			#map { position: fixed; inset: 0; background: #e8e4dc; }
+			/* zoom buttons: bottom right, above the credit line; "−" greys out at the zoom-out limit */
+			#zoom { position: fixed; right: 16px; bottom: 44px; z-index: 3; display: flex; flex-direction: column;
+				border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(40,35,25,0.18); background: rgba(255,253,248,0.94); }
+			#zoom button { width: 40px; height: 40px; border: 0; background: transparent; color: #3b3630; font: 500 22px/1 ui-sans-serif, system-ui, sans-serif;
+				cursor: pointer; touch-action: manipulation; }
+			#zoom button + button { border-top: 1px solid rgba(60,50,40,0.12); }
+			#zoom button:hover:not(:disabled) { background: rgba(0,0,0,0.05); }
+			#zoom button:focus-visible { outline: 2px solid #b5643f; outline-offset: -2px; }
+			#zoom button:disabled { color: rgba(59,54,48,0.3); cursor: default; }
+			body.video .ui, body.hide-ui .ui { display: none; }
+			#ambient-tint, #ambient-wash { position: fixed; inset: 0; z-index: 2; pointer-events: none; opacity: 0; transition: background-color 1.2s linear, opacity 0.6s; }
+			#ambient-tint { mix-blend-mode: multiply; background: #fff; }
+			#ambient-wash { mix-blend-mode: soft-light; }
+			#ambient { position: fixed; left: 16px; bottom: 44px; z-index: 3; max-width: min(340px, calc(100vw - 88px)); padding: 8px 10px;
+				border-radius: 12px; background: rgba(255,253,248,0.94); box-shadow: 0 2px 10px rgba(40,35,25,0.18); color: #3b3630;
+				font: 13px/1.35 ui-sans-serif, system-ui, sans-serif; }
+			#ambient .row { display: flex; align-items: center; gap: 8px; }
+			#ambient .meta { margin-top: 4px; justify-content: space-between; color: #6a6258; font-size: 12px; }
+			#ambient input[type=range] { flex: 1; min-width: 80px; accent-color: #b5643f; }
+			#ambient button { border: 0; background: rgba(0,0,0,0.06); color: inherit; border-radius: 8px; padding: 4px 8px; font: inherit; cursor: pointer; touch-action: manipulation; }
+			#ambient button:hover { background: rgba(0,0,0,0.1); }
+			#ambient button:focus-visible { outline: 2px solid #b5643f; outline-offset: 1px; }
+			#ambient-live.on { background: #b5643f; color: #fff; }
+			#ambient-clock { font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; }
+			#help { margin-top: 6px; border-top: 1px solid rgba(60,50,40,0.12); padding-top: 6px; font-size: 12px; color: #4d463e; }
+			#help p { margin: 0 0 6px; }
+			#help .keys b { display: inline-block; min-width: 1.2em; text-align: center; border: 1px solid rgba(60,50,40,0.25); border-radius: 4px; padding: 0 3px; }
 			#preview { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; background: #e8e4dc; }
 			/* landscape: the image is 0.8 × as tall as wide; portrait and squarish screens: 2.2 × (export.ts PREVIEWS) */
 			#preview .frame { position: absolute; left: 0; top: 50%; width: 100%; aspect-ratio: 1 / 0.8; transform: translateY(-50%); }

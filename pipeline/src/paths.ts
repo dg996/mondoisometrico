@@ -33,7 +33,13 @@ export function loadEnv(): Record<string, string> {
 export const readJson = <T = any>(p: string): T => JSON.parse(readFileSync(p, "utf8"));
 
 /** Write a sharp image so readers never see a half-written file (other jobs read tiles while we paint). */
+/** Encode for the file's extension: painted windows are stored as lossless WebP (~30% smaller than
+ *  PNG, identical pixels), everything else stays PNG. */
+export function encodeFor(img: import("sharp").Sharp, file: string) {
+  return file.endsWith(".webp") ? img.webp({ lossless: true, effort: 4 }) : img.png();
+}
+
 export async function writeAtomic(img: import("sharp").Sharp, file: string) {
-  await img.toFile(`${file}.tmp`);
+  await encodeFor(img, file).toFile(`${file}.tmp`);
   (await import("node:fs")).renameSync(`${file}.tmp`, file);
 }

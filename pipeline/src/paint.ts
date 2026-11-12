@@ -31,7 +31,8 @@ const WIN = 1024, OVERLAP = 128, STRIDE = WIN - OVERLAP, T = CAMERA.tile;
 /** Blend band in the middle of each overlap; outside it a window's own pixels win outright. */
 const FEATHER = 64;
 const STYLE = join(PIPELINE, "style", "reference.png");
-const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
+// species sheet (painted once with Codex): Rome has its own (stone pine, plane, holm oak, cypress, olive, palm, oleander)
+const treesSheet = (area: string) => join(PIPELINE, "style", openArea(area).region === "roma-centro" ? "trees-roma.png" : "trees.png");
 const SEA = join(PIPELINE, "style", "sea.png");
 /** Registration floor; landmarks do not get an exception to geometric alignment. */
 const MIN_MATCH = 0.45;
@@ -139,14 +140,23 @@ const winDir = join(base, "windows");
 mkdirSync(winDir, { recursive: true });
 
 const renderFile = (tx: number, ty: number) => join(base, "render", `${tx}_${ty}.png`);
-const localWinFile = (i:number,j:number) => join(winDir,`${i}_${j}.png`);
-const winFile = (i:number,j:number) => [localWinFile(i,j),...contextAreas.map(a=>join(DERIVED,a,"windows",`${i}_${j}.png`))].find(existsSync) ?? localWinFile(i,j);
+/** Painted windows: lossless WebP; PNG from before the switch is still read (migrate-windows.ts converts). */
+const localWinFile = (i:number,j:number) => join(winDir,`${i}_${j}.webp`);
+const windowCandidates = (dir: string, i: number, j: number) => [join(dir, `${i}_${j}.webp`), join(dir, `${i}_${j}.png`)];
+/** The window on disk here (either format), or the WebP path a new painting will be written to. */
+const localExisting = (i:number,j:number) => windowCandidates(winDir,i,j).find(existsSync) ?? localWinFile(i,j);
+const winFile = (i:number,j:number) => [...windowCandidates(winDir,i,j),...contextAreas.flatMap(a=>windowCandidates(join(DERIVED,a,"windows"),i,j))].find(existsSync) ?? localWinFile(i,j);
+/** Remove a window here in every format (a repaint must not leave a stale PNG behind a new WebP). */
+const removeLocalWindow = (i:number,j:number) => { for (const f of windowCandidates(winDir,i,j)) rmSync(f, { force: true }); };
+/** After a new WebP is safely written: drop the superseded PNG of the same window (never before). */
+const dropLegacyPng = (i:number,j:number) => rmSync(join(winDir, `${i}_${j}.png`), { force: true });
 const paletteFiles = () => {
   const files = new Map<string,string>();
   for(const area of [...contextAreas,areaName].sort()) {
     const dir=join(DERIVED,area,"windows"); if(!existsSync(dir)) continue;
-    for(const file of readdirSync(dir).filter(f=>/^-?\d+_-?\d+\.png$/.test(f))) {
-      const key=file.slice(0,-4), path=join(dir,file), prev=files.get(key);
+    for(const file of readdirSync(dir).filter(f=>/^-?\d+_-?\d+\.(png|webp)$/.test(f)).sort((a,b)=>Number(b.endsWith(".webp"))-Number(a.endsWith(".webp")))) {
+      const key=file.replace(/\.(png|webp)$/,""), path=join(dir,file), prev=files.get(key);
+      if(prev && prev.startsWith(dir)) continue; // same area: the WebP (sorted first) is the canonical copy
       if(prev && !readFileSync(prev).equals(readFileSync(path))) throw new Error(`conflicting paint window ${key}: ${prev} / ${path}; choose one canonical painting before assembly`);
       files.set(key,path);
     }
@@ -403,7 +413,7 @@ async function dropDarkWindows(wins: Array<[number, number]>) {
   await pool(wins, 8, async ([i, j]) => {
     if (!existsSync(winFile(i, j))) return;
     const render = await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN)).png().toBuffer();
-    if (existsSync(localWinFile(i,j)) && await hasDarkPatch(localWinFile(i,j), render)) { rmSync(localWinFile(i,j)); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
+    if (existsSync(localExisting(i,j)) && await hasDarkPatch(localExisting(i,j), render)) { removeLocalWindow(i,j); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
   });
   if (n) console.log(`  dropped ${n} windows with black patches`);
 }
@@ -443,7 +453,7 @@ async function paintWindow(i: number, j: number) {
   // repaints — stubborn windows (score plateaus below MIN_MATCH) must not burn 3 generations per
   // pass forever. `--force` or deleting the .soft marker still forces a full repaint.
   if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) {
-    const sf = `${localWinFile(i, j)}.soft`;
+    const sf = `${localExisting(i, j)}.soft`;
     if (!existsSync(sf)) return;
     try {
       const tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0;
@@ -455,7 +465,8 @@ async function paintWindow(i: number, j: number) {
     let img = sharp(SEA).resize(WIN, WIN);
     if ((i + j) & 1) img = img.flop();
     if (j & 1) img = img.flip();
-    await writeAtomic(img.png(), localWinFile(i, j));
+    await writeAtomic(img, localWinFile(i, j));
+    dropLegacyPng(i, j);
     console.log(`  ${i}_${j}: sea texture`);
     return;
   }
@@ -466,7 +477,7 @@ async function paintWindow(i: number, j: number) {
   mkdirSync(sand, { recursive: true });
   const edges = await composeInput(i, j, join(sand, "input.png"), join(sand, "height.png"));
   copyFileSync(STYLE, join(sand, "style.png"));
-  copyFileSync(TREES, join(sand, "trees.png"));
+  copyFileSync(treesSheet(areaName), join(sand, "trees.png"));
   // also keep inputs under data/ for local debugging
   for (const f of ["input.png", "height.png", "style.png", "trees.png"] as const)
     copyFileSync(join(sand, f), join(work, f));
@@ -521,8 +532,9 @@ async function paintWindow(i: number, j: number) {
         continue;
       }
       const warp = structured && r.score > r.identity + 0.01;
+      for (const f of windowCandidates(winDir, i, j)) rmSync(`${f}.soft`, { force: true }); // passed: clear any soft-accept flag
       await applyRegistration(join(work, "out.png"), localWinFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
-      rmSync(`${localWinFile(i, j)}.soft`, { force: true }); // passed: clear any soft-accept flag
+      dropLegacyPng(i, j);
       console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${r.score.toFixed(2)}`
         + (structured ? "" : " (low texture)") + (warp ? ` shift=(${r.dx},${r.dy}) scale=${r.scale.toFixed(2)}` : ""));
       // keep qa.json + codex.log for debugging; the images are ~6 MB per window
@@ -536,6 +548,7 @@ async function paintWindow(i: number, j: number) {
   if (bestR && bestR.score >= SOFT_MATCH) {
     const warp = bestR.score > bestR.identity + 0.01;
     await applyRegistration(bestFile, localWinFile(i, j), warp ? bestR : { ...bestR, scale: 1, dx: 0, dy: 0 });
+    dropLegacyPng(i, j);
     const sf = `${localWinFile(i, j)}.soft`;
     let tries = 0;
     try { tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0; } catch {}
@@ -733,15 +746,15 @@ async function main() {
     const open = [];
     for (const [i, j] of windows()) if ((await seaFraction(i, j)) >= 0.995) open.push([i, j]);
     for (const [i, j] of open.slice(0, 3)) {
-      rmSync(winFile(i, j), { force: true });
+      removeLocalWindow(i, j);
       await paintWindow(i, j);
       if (existsSync(winFile(i, j)) && (await looksLikeSea(winFile(i, j)))) {
-        copyFileSync(winFile(i, j), SEA);
+        await sharp(winFile(i, j)).png().toFile(SEA); // the shared sea texture stays a PNG
         console.log(`  sea texture from ${i}_${j}`);
         break;
       }
       console.warn(`  ${i}_${j}: painted sea doesn't look like sea, trying another window`);
-      rmSync(winFile(i, j), { force: true });
+      removeLocalWindow(i, j);
     }
   }
   // One hard window must not abort siblings mid-ring: keep painting, then fail closed at the end.

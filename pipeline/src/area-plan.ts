@@ -1,7 +1,7 @@
 /** Read-only estimates; no data/, API calls or changes to active areas.
  * node --import tsx pipeline/src/area-plan.ts
  */
-import { AREAS, AREA_PROPOSALS, areaTiles } from "./areas.ts";
+import { AREAS, areaTiles } from "./areas.ts";
 import { CAMERA, useRegion } from "./camera.ts";
 
 const T = CAMERA.tile, WIN = 1024, STRIDE = 896;
@@ -16,7 +16,7 @@ function windowCount(tiles: number[][]) {
 useRegion("roma-centro");
 const current = new Set(["roma-core", "roma-inner"].flatMap(a => areaTiles(AREAS[a].bbox).map(key)));
 console.log(`Current planned render union: ${current.size} tiles (not a count of files on disk).`);
-console.table(Object.entries({"roma-nord":AREAS["roma-nord"],...AREA_PROPOSALS}).map(([name, area]) => {
+console.table(Object.entries({"roma-nord":AREAS["roma-nord"],"roma-sud":AREAS["roma-sud"],"roma-est":AREAS["roma-est"]}).map(([name, area]) => {
   const tiles = areaTiles(area.bbox), added = tiles.filter(t => !current.has(key(t)));
   return { name, bbox: area.bbox.join(","), renderTiles: tiles.length, newTiles: added.length,
     paintWindows: windowCount(tiles), newTileWindows: windowCount(added) };

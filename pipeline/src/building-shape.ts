@@ -32,8 +32,25 @@ export function osmSolid(t: Record<string,string>) {
     || t.amenity === "fountain" || t.historic === "monument" || t.historic === "memorial");
 }
 
-/** Surface height above the eaves; geographic footprint remains unrotated. */
-export function roofRise(x:number,y:number,ring:Footprint,shape:string,height:number,direction?:number,across=false) {
+/** Pitch of a Roman coppi roof (~28°): rise per metre in from the eaves. */
+export const ROMAN_PITCH = 0.53;
+
+/** Distance from (x, y) to the nearest edge of any of the rings. */
+function edgeDistance(x:number,y:number,rings:Footprint[]) {
+  let d=Infinity;
+  for(const r of rings) for(let i=0,j=r.length-1;i<r.length;j=i++) {
+    const [ax,ay]=r[j],[bx,by]=r[i],dx=bx-ax,dy=by-ay,L=dx*dx+dy*dy||1e-9;
+    const t=Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/L));
+    d=Math.min(d,Math.hypot(x-ax-t*dx,y-ay-t*dy));
+  }
+  return d;
+}
+
+/** Surface height above the eaves; geographic footprint remains unrotated.
+ * "roman": hipped all round, also round courtyards (holes): rises from every eave at ROMAN_PITCH up to
+ * `height`, so any palazzo outline gets hips, valleys and a ridge (or a flat top on deep blocks). */
+export function roofRise(x:number,y:number,ring:Footprint,shape:string,height:number,direction?:number,across=false,holes:Footprint[]=[]) {
+  if (shape === "roman") return Math.min(height, edgeDistance(x,y,[ring,...holes])*ROMAN_PITCH);
   if (!['dome','gabled','skillion','hipped','pyramidal'].includes(shape)) return height;
   const cx=ring.reduce((s,p)=>s+p[0],0)/ring.length, cy=ring.reduce((s,p)=>s+p[1],0)/ring.length;
   if(shape === "dome") {

@@ -9,9 +9,8 @@
  * A CITY is a named view into a region: /<city-slug> opens the region centred on it.
  *
  * Research notes (Rome, 2026):
- * - Buildings/heights: start with OSM (`building` + `height` / `building:levels`). Planned upgrade:
- *   Regione Lazio DBT 2014 (CC BY 4.0) and/or Roma Capitale GeoRoma WFS
- *   (https://geoportale.comune.roma.it/geoserver/ows) — cite when wired in fetch.ts.
+ * - Buildings/heights: OSM footprints; heights from the Regione Lazio CTRN 2002-2003 1:5000 volumetric
+ *   units (CC BY 4.0, src/ctrn.ts), OSM height / building:levels / 3D parts where the CTRN has nothing.
  * - Trees: OSM natural=tree / landuse=forest / leisure=park (Mediterranean: stone pine, umbrella pine,
  *   cypress, plane, olive; TLV tree sheet is a starting palette until a Rome sheet is painted).
  * - Municipal border: OSM admin_level=8 name "Roma", country name:en "Italy".
@@ -56,6 +55,8 @@ export const REGIONS: Record<string, Region> = {
     airport: { lat: 41.8003, lon: 12.2389, runwayHeadingDeg: 163 }, // Fiumicino FCO, runway 16L
     credits: [
       "Map data © OpenStreetMap contributors",
+      "Edifici: Regione Lazio, CTRN 2002-2003 (CC BY 4.0)",
+      "Alberi: © ESA WorldCover 2021, Copernicus Sentinel data (CC BY 4.0)",
       "Terrain: Copernicus DEM © DLR, Airbus DS · Painted with AI",
     ],
   },

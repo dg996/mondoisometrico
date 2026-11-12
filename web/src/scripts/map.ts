@@ -7,6 +7,7 @@ import { CAMERA, llhToPixel, useRegion } from "../../../pipeline/src/camera.ts";
 import { CITIES } from "../../../pipeline/src/places.ts";
 import { LANDMARKS, landmarkPixel } from "../../../pipeline/src/landmarks.ts";
 import { ActivityMask, activeRoads, type ActivityCoverage } from "./activity.ts";
+import { startAmbient } from "./ambient.ts";
 declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by astro.config.mjs
 
 interface World {
@@ -27,7 +28,7 @@ interface World {
   layers: { photo: number; art: number };
   attributions: string[];
   /** content-hashed data files (absent in data exported before them: then the legacy names) */
-  files?: { "tiles-map"?: string; "tiles-photo"?: string; borders?: string; roads?: string };
+  files?: { "tiles-map"?: string; "tiles-photo"?: string; borders?: string; roads?: string; transit?: string };
   format?: string;
 }
 type Index = Record<number, Record<string, string>>; // zoom → "x_y" → content hash
@@ -128,22 +129,33 @@ const globalToViewport = (x: number, y: number) => base().imageToViewportCoordin
 // ---- overlay: borders, labels, traffic ------------------------------------------------------
 let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
-let traffic: Traffic | null = null, cats: Cats | null = null;
+let traffic: Traffic | null = null, cats: Cats | null = null, trams: import("./trams.ts").Trams | null = null;
 // the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
 let animationsRequested = false;
 function loadAnimations() {
   if (animationsRequested || !activity.rects.length) return;
   animationsRequested = true;
   Promise.all([
-    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"),
+    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"), import("./trams.ts"),
     fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
-  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, data]) => {
+    // real bus and tram lines (Roma Servizi per la Mobilità GTFS, CC BY-SA), when exported
+    files.transit ? fetch(`${BASE}/data/${files.transit}`).then((r) => (r.ok ? r.json() : null)) : Promise.resolve(null),
+  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, data, transit]) => {
     const roads = activeRoads(decodeRoads(data), world.enu2px, activity);
-    if (roads.length) traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
+    if (roads.length) {
+      traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)], 1, transit?.buses ?? []);
+      traffic.clock = () => ambient.minutes();
+    }
+    if (transit?.trams?.meta?.length) {
+      // tag each track with its line before activeRoads splits it into visible stretches
+      const tracks = decodeRoads(transit.trams.tracks).map((r, t) => Object.assign(r, { t }));
+      trams = new Trams(activeRoads(tracks, world.enu2px, activity), transit.trams.meta, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
+      trams.clock = () => ambient.minutes();
+    }
     if (roads.length) cats = new Cats(roads, world.enu2px);
     // Unbounded scenic flight routes escape the ready area. Keep them inactive until routes
     // can be certified against the same coverage mask as the road graph.
-    Object.assign(window as object, { __traffic: traffic, __cats: cats, __parrots: null, __planes: null });
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __parrots: null, __planes: null });
   });
 }
 setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
@@ -226,6 +238,7 @@ function drawLandmarks(dpr: number, pxPerArt: number) {
   }
 }
 
+const ambient = startAmbient(); // light of the hour + live weather (#ambient panel)
 let lastT = performance.now();
 function frame(t: number) {
   const dpr = window.devicePixelRatio || 1;
@@ -244,6 +257,10 @@ function frame(t: number) {
   ctx.beginPath();
   for (const [x0,y0,x1,y1] of activity.rects) ctx.rect(x0*k+tx,y0*k+ty,(x1-x0)*k,(y1-y0)*k);
   ctx.clip(); // final guard for antialiasing / full silhouettes at tile boundaries
+  if (trams && showTraffic && px >= 0.28) {
+    trams.step(dt);
+    trams.draw(ctx, toScreen, px, [0, 0, w, hgt]);
+  }
   if (traffic && showTraffic && px >= 0.28) {
     traffic.step(dt);
     traffic.draw(ctx, toScreen, px, [0, 0, w, hgt]);
@@ -253,6 +270,7 @@ function frame(t: number) {
     cats.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
   ctx.restore();
+  ambient.draw(ctx, w, hgt, dt); // rain / fog of the live weather (screen space, over the map)
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview
   if (px >= 0.06) drawLandmarks(dpr, px); // monumenti principali when zoomed in enough
   lastT = t;
@@ -273,12 +291,16 @@ function togglePhoto() {
   } else photo.setOpacity(photo.getOpacity() > 0 ? 0 : 1);
 }
 
+const helpToggle = document.getElementById("help-toggle"), help = document.getElementById("help");
+helpToggle?.addEventListener("click", () => { if (!help) return; help.hidden = !help.hidden; helpToggle.setAttribute("aria-expanded", String(!help.hidden)); });
 window.addEventListener("keydown", (e) => {
+  if (e.target instanceof HTMLInputElement) return; // typing / sliding must not toggle layers
   const key = e.key.toLowerCase();
   if (key === "b") showBorders = !showBorders;
   if (key === "t") showTraffic = !showTraffic;
   if (key === "p") togglePhoto();
   if (key === "v") document.body.classList.toggle("video");
+  if (key === "h") document.body.classList.toggle("hide-ui"); // hide every control, keep the credits
 });
 if (new URLSearchParams(location.search).has("video")) document.body.classList.add("video");
 
@@ -362,6 +384,24 @@ viewer.addOnceHandler("open", () => {
     }
   };
   viewer.addHandler("animation", clampCenter);
+  // + / − buttons: same steps as the scroll wheel; never past the zoom-out limit (fitZoom) or the
+  // deepest useful zoom, and "−" greys out at the limit so the map never shrinks into a small island
+  const zoomIn = document.getElementById("zoom-in") as HTMLButtonElement | null;
+  const zoomOut = document.getElementById("zoom-out") as HTMLButtonElement | null;
+  const syncZoomButtons = () => {
+    const z = viewer.viewport.getZoom();
+    if (zoomOut) zoomOut.disabled = z <= fitZoom * 1.01;
+    if (zoomIn) zoomIn.disabled = z >= viewer.viewport.getMaxZoom() * 0.99;
+  };
+  const step = (factor: number) => {
+    const vp = viewer.viewport;
+    vp.zoomTo(Math.min(vp.getMaxZoom(), Math.max(fitZoom, vp.getZoom() * factor)));
+    vp.applyConstraints();
+  };
+  zoomIn?.addEventListener("click", () => step(1.6));
+  zoomOut?.addEventListener("click", () => step(1 / 1.6));
+  viewer.addHandler("zoom", syncZoomButtons);
+  syncZoomButtons();
   viewer.addHandler("animation-finish", () => {
     clampCenter();
     const c = base().viewportToImageCoordinates(viewer.viewport.getCenter(true));
@@ -371,6 +411,10 @@ viewer.addOnceHandler("open", () => {
 
 document.getElementById("credits")!.innerHTML = [
   `© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>`,
+  `Edifici: <a href="https://dati.lazio.it/en/dataset/carta-tecnica-regionale-2002-2003-5k-roma">Regione Lazio CTRN</a> (CC BY 4.0)`,
+  `Alberi: <a href="https://esa-worldcover.org/">© ESA WorldCover 2021</a> (CC BY 4.0)`,
+  `Meteo: <a href="https://open-meteo.com/">Open-Meteo.com</a> (CC BY 4.0)`,
+  `Mezzi: <a href="https://dati.comune.roma.it/catalog/dataset/c_h501-d-9000">Roma Servizi per la Mobilità</a> (CC BY-SA)`,
   `<span title="© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA">Copernicus DEM</span>`,
   `<a href="https://github.com/dg996/mondoisometrico">Source</a>`,
   `Made by <a href="https://domenicogagliardi.com">Domenico Gagliardi</a>`,

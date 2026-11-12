@@ -3,7 +3,7 @@ import type { DeckPoint } from "../src/bridge-profile.ts";
 
 /** Geometry is visible in BOTH colour and height passes, providing real support for traffic.
  * No fabricated arches/piers: their historic shape must come from surveyed OSM geometry. */
-export function bridgeMesh(points: DeckPoint[], width:number, pedestrian:boolean) {
+export function bridgeMesh(points: DeckPoint[], width:number, pedestrian:boolean, rail=false) {
   const group=new THREE.Group();
   const strip=(lo:number,hi:number,lift:number,color:number,markings=false)=>{
     const positions:number[]=[];
@@ -23,7 +23,10 @@ export function bridgeMesh(points: DeckPoint[], width:number, pedestrian:boolean
     group.add(new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({color,side:THREE.DoubleSide})));
   };
   strip(-width/2-0.6,width/2+0.6,0,0xd9d2c3);
-  strip(-width/2,width/2,0.01,pedestrian?0xc8c1b2:0x777a80);
+  strip(-width/2,width/2,0.01,rail?0x9a9184:pedestrian?0xc8c1b2:0x777a80);
+  // rail deck: ballast with a pair of rails per track (spacing 4.5 m between track centres)
+  if(rail) { const tracks=Math.max(1,Math.round((width-1.2)/3.6));
+    for(let k=0;k<tracks;k++){ const c=(k-(tracks-1)/2)*4.5; for(const r of [-0.72,0.72]) strip(c+r-0.07,c+r+0.07,0.04,0x4b4d52); } }
   // parapet top and outer faces; no new mid-span supports invented by the renderer
   for(const side of [-1,1]) {
     strip(side*width/2-0.2,side*width/2+0.2,0.85,0xd9d2c3);
@@ -37,6 +40,6 @@ export function bridgeMesh(points: DeckPoint[], width:number, pedestrian:boolean
     const g=new THREE.BufferGeometry();g.setAttribute("position",new THREE.Float32BufferAttribute(vertices,3));
     group.add(new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0xc7bfae,side:THREE.DoubleSide})));
   }
-  if(!pedestrian && width>=7) strip(-0.07,0.07,0.03,0xf2efe6,true);
+  if(!pedestrian && !rail && width>=7) strip(-0.07,0.07,0.03,0xf2efe6,true);
   return group;
 }

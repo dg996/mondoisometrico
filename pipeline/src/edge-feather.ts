@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import { CLOUD_SCALE, fbm } from "./clouds.ts";
 
 /**
  * Soft edge between the painted city and the blurred, unpainted context around it.
@@ -9,7 +10,7 @@ import sharp from "sharp";
  * version of the same pixels, so the city dissolves into the blur instead of stopping.
  */
 export const FEATHER = 640;            // art px (≈160 m at 0.25 m/px)
-export const FEATHER_VERSION = `feather${FEATHER}-dark1`;
+export const FEATHER_VERSION = `feather${FEATHER}-dark1-clouds1`;
 
 const parse = (k: string) => k.split("_").map(Number) as [number, number];
 
@@ -43,7 +44,10 @@ export function featherAlpha(painted: Set<string>, x0: number, y0: number, size:
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
     const gx = x / step, gy = y / step, i = Math.min(n - 2, Math.floor(gx)), j = Math.min(n - 2, Math.floor(gy)), fx = gx - i, fy = gy - j;
     const d = (grid[j * n + i] * (1 - fx) + grid[j * n + i + 1] * fx) * (1 - fy) + (grid[(j + 1) * n + i] * (1 - fx) + grid[(j + 1) * n + i + 1] * fx) * fy;
-    const t = Math.min(1, Math.max(0, d / feather));
+    const t0 = Math.min(1, Math.max(0, d / feather));
+    // billowy, not tile-straight: the painted city dissolves along cloud-like puffs (t stays 0 and 1 at the ends)
+    const puff = (fbm((x0 + x) / (CLOUD_SCALE * 0.5), (y0 + y) / (CLOUD_SCALE * 0.5), 4) - 0.5) * 3.2 * t0 * (1 - t0);
+    const t = Math.min(1, Math.max(0, t0 + puff));
     const v = Math.round(t * t * (3 - 2 * t) * 255);
     a[y * size + x] = v;
     if (v < 255) all = false;

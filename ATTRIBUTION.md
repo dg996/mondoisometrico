@@ -18,7 +18,7 @@ protette da copyright ovunque; dove lo sono, si applica CC BY 4.0.
 
 Mostrata in mappa (footer), in modalità video e su ogni clip; usarla su repost, caption e end card:
 
-> Map data © OpenStreetMap contributors · Terrain: Copernicus DEM © DLR, Airbus DS · Painted with AI
+> Map data © OpenStreetMap contributors · Edifici: Regione Lazio, CTRN 2002-2003 (CC BY 4.0) · Alberi: © ESA WorldCover 2021 (CC BY 4.0) · Terrain: Copernicus DEM © DLR, Airbus DS · Painted with AI
 
 Ogni regione elenca le proprie righe in `pipeline/src/places.ts` (`credits`).
 
@@ -27,13 +27,15 @@ Ogni regione elenca le proprie righe in `pipeline/src/places.ts` (`credits`).
 | Fonte | Uso | Licenza | Obblighi |
 |---|---|---|---|
 | [OpenStreetMap](https://www.openstreetmap.org/copyright) (via Overpass API) | suolo (strade, marciapiedi, parchi, acqua, ferrovia, landuse), edifici e alberi a Roma (attuale), confini comunali, strade per il traffico simulato | [ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/) | "© OpenStreetMap contributors" visibile con mappa e video. Immagini e video sono Produced Works. Il database derivato non è redistribuito: `pipeline/` è il metodo pubblicato per ricrearlo. |
+| [Regione Lazio, Carta Tecnica Regionale Numerica 2002-2003 1:5000, Provincia di Roma](https://dati.lazio.it/en/dataset/carta-tecnica-regionale-2002-2003-5k-roma) (layer 06V "unità volumetriche", shapefile per municipio dal [geoportale](https://geoportale.regione.lazio.it/cartografia/2002_2003_CTRN_5K_SHP/Roma/Municipi/)) | altezza misurata di ogni volume edilizio di Roma (`pipeline/src/ctrn.ts`): i volumi vengono ritagliati sulle impronte OSM, così palazzi a gradoni, navate, campanili e tamburi/cupole stanno alla quota rilevata. Conversione Gauss-Boaga (EPSG:3004) -> WGS84 con i parametri EPSG; scarto misurato rispetto a OSM circa 1 m | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Citare "Regione Lazio, CTRN 2002-2003 1:5000 (CC BY 4.0)" con mappa e video. I volumi sono del 2002-2003: dove OSM non ha un edificio, il volume CTRN non viene disegnato. |
+| [ESA WorldCover 10 m 2021 v200](https://esa-worldcover.org/) (AWS Open Data, tile N39E012) | dove stanno davvero le chiome degli alberi a Roma (classe "tree cover"): parchi, viali, giardini. Si usano solo gruppi compatti di pixel, mai su edifici, carreggiate, piazze lastricate, acqua o campi sportivi | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | "© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium" |
 | [Copernicus DEM GLO-30](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM) (AWS Open Data) | altezza del terreno | Licenza Copernicus DEM: libera, anche uso commerciale | "© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved". |
 
 ### Previsti (non ancora collegati)
 
 | Fonte | Uso previsto | Licenza | Note |
 |---|---|---|---|
-| [Regione Lazio DBT 2014](https://geoportale.regione.lazio.it/) | footprint edifici + altezze | CC BY 4.0 | Migliori delle altezze OSM; citare quando aggiunti a `fetch.ts` / `scene.ts`. |
+| [Copernicus Urban Atlas Building Height 2012](https://land.copernicus.eu/en/products/urban-atlas/building-height-2012) | controllo incrociato delle altezze | Copernicus, libera con attribuzione | Valutata e non usata: raster a 10 m, al Pantheon dà 8 m (media del pixel). Troppo grossolana per i monumenti. |
 | [Roma Capitale GeoRoma](https://geoportale.comune.roma.it/) (WFS/WMS) | layer comunali | [CC BY 4.0](https://dati.comune.roma.it/od/it/legal.page) | Controllare i metadati del layer; citare Roma Capitale. |
 
 Nessuno di questi dati è nel repository: `npm run fetch` li scarica in `data/` (ignorato da git).
@@ -46,7 +48,8 @@ I termini OpenAI assegnano i diritti sull’output all’utente. Nessun credito 
 dicono "Painted with AI" perché le piattaforme sociali chiedono di etichettare i contenuti AI.
 
 I file in `pipeline/style/` sono stati dipinti allo stesso modo nel progetto a monte: `reference.png`,
-`trees.png` e `sea.png`.
+`trees.png` e `sea.png`. `trees-roma.png` (pino domestico, platano, leccio, cipresso, olivo, palma, oleandro)
+è stato dipinto con Codex per questo progetto, partendo da `trees.png` come riferimento di stile.
 
 ## Software
 
