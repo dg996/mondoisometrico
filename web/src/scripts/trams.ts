@@ -15,7 +15,7 @@ export interface TramMeta { n: string; d: number; h: number }
 interface Track { r: Road; n: number; cum: Float32Array; len: number; line: number }
 interface Tram { t: number; s: number; v: number }
 
-const SPEED = 6.5, CAR = 11.2, GAP_CARS = 0.35, CARS = 3, WIDTH = 2.4, HEIGHT = 3.4;
+const SPEED = 6.5, CAR = 11.2, GAP_CARS = 0.6, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
 const BODY: [number, number, number] = [228, 226, 220];
 
 export class Trams {
@@ -88,6 +88,10 @@ export class Trams {
     for (const it of items) {
       // cars[0] leads: windscreen only at the front of the first car and the back of the last
       const ends = it.cars.map((_, k) => (k === 0 ? 2 : 0) | (k === it.cars.length - 1 ? 1 : 0));
+      for (let k = 0; k + 1 < it.cars.length; k++) { // bellows first, the cars cover their ends
+        const a = it.cars[k], b = it.cars[k + 1];
+        this.bellows(ctx, proj, [(a.c[0] + b.c[0]) / 2, (a.c[1] + b.c[1]) / 2, (a.c[2] + b.c[2]) / 2], a.d);
+      }
       for (const k of it.cars.map((_, k) => k).sort((a, b) => (it.cars[b].c[0] * this.camFwd[0] + it.cars[b].c[1] * this.camFwd[1]) - (it.cars[a].c[0] * this.camFwd[0] + it.cars[a].c[1] * this.camFwd[1])))
         this.car(ctx, proj, it.cars[k].c, it.cars[k].d, ends[k]);
       if (px >= 1.1) {
@@ -102,16 +106,34 @@ export class Trams {
     }
   }
 
-  /** one tram car as a lofted model (vehicle-mesh.ts): light body, window band, pillars and doors */
+  /** one tram car: the cab cars carry the raked nose (the rear cab is turned round), middle cars square */
   private car(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number], ends = 0) {
     const view: Vec3 = [this.camFwd[0] * Math.SQRT1_2, this.camFwd[1] * Math.SQRT1_2, -Math.SQRT1_2];
     const [ax, ay] = proj(c), [bx, by] = proj([c[0] + d[0], c[1] + d[1], c[2]]), pxPerM = Math.hypot(bx - ax, by - ay);
-    // soft contact shadow
     const r: [number, number] = [d[1], -d[0]], hl = CAR / 2, hw = WIDTH / 2;
     const pt = (a: number, b: number): [number, number] => proj([c[0] + d[0] * a + r[0] * b + 0.4, c[1] + d[1] * a + r[1] * b + 0.3, c[2] + 0.05]);
     ctx.globalAlpha = 0.2; ctx.fillStyle = "#000"; ctx.beginPath();
     [pt(hl, hw), pt(-hl, hw), pt(-hl, -hw), pt(hl, -hw)].forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
     ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
-    drawCar(ctx, proj, c, d, "bus", CAR, WIDTH, HEIGHT, BODY, view, SUN, pxPerM, false, ends);
+    const cab = ends & 2 ? 1 : ends & 1 ? -1 : 0, dir: [number, number] = cab === -1 ? [-d[0], -d[1]] : d;
+    drawCar(ctx, proj, c, dir, cab ? "tram-cab" : "tram", CAR, WIDTH, HEIGHT, BODY, view, SUN, pxPerM);
+    if (pxPerM < 3) return;
+    // roof equipment: an air-conditioning box on every car, the pantograph on the middle one
+    const roofAt = (a: number): Vec3 => [c[0] + d[0] * a, c[1] + d[1] * a, c[2] + HEIGHT];
+    drawCar(ctx, proj, roofAt(cab === 1 ? -1.2 : cab === -1 ? 1.2 : -2.2), d, "box", 2.4, WIDTH * 0.55, 0.38, [196, 198, 196], view, SUN, pxPerM);
+    if (!cab) {
+      const base = roofAt(1.2), top = HEIGHT + 1.3, q = (a: number, b: number, z: number): Vec3 => [base[0] + d[0] * a + r[0] * b, base[1] + d[1] * a + r[1] * b, c[2] + z];
+      ctx.strokeStyle = "#2a2c30"; ctx.lineWidth = Math.max(0.7, pxPerM * 0.07); ctx.beginPath();
+      for (const [a, b] of [[q(-0.9, 0, HEIGHT + 0.1), q(0.2, 0, HEIGHT + 0.75)], [q(0.2, 0, HEIGHT + 0.75), q(-0.3, 0, top)], [q(-0.3, -0.8, top), q(-0.3, 0.8, top)]] as Array<[Vec3, Vec3]>) {
+        const [x1, y1] = proj(a), [x2, y2] = proj(b); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      }
+      ctx.stroke();
+    }
+  }
+
+  /** dark rubber bellows between two cars */
+  private bellows(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number]) {
+    const view: Vec3 = [this.camFwd[0] * Math.SQRT1_2, this.camFwd[1] * Math.SQRT1_2, -Math.SQRT1_2];
+    drawCar(ctx, proj, c, d, "box", GAP_CARS + 0.5, WIDTH * 0.9, HEIGHT * 0.88, [44, 46, 50], view, SUN, 4);
   }
 }
