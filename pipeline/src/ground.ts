@@ -139,6 +139,7 @@ function areaKind(t: Record<string, string>): string | null {
   if (["farmland", "orchard", "allotments", "plant_nursery", "greenhouse_horticulture", "vineyard"].includes(lu)) return "farm";
   if (["construction", "brownfield", "greenfield", "landfill"].includes(lu)) return "dirt";
   if (am === "parking") return "parking";
+  if (t["area:highway"] === "steps") return "stairs";
   if (t["area:highway"] || t.place === "square" || (t.highway === "pedestrian" && t.area === "yes")
     || ["pier", "breakwater", "groyne"].includes(t.man_made)) return "paving";
   if (["school", "university", "college", "hospital"].includes(am)) return "campus";
@@ -251,7 +252,7 @@ for (const el of osm.elements) {
           if (fit > w + 0.5) { w = fit; widened++; }
         }
       }
-      const kind = road ? (road[1] ? "street" : t.highway.startsWith("motorway") || t.highway.startsWith("trunk") ? "highway" : t.highway === "track" ? "dirtroad" : "lane") : t.highway === "cycleway" ? "cycle" : t.highway === "pedestrian" ? "plaza" : "path";
+      const kind = road ? (road[1] ? "street" : t.highway.startsWith("motorway") || t.highway.startsWith("trunk") ? "highway" : t.highway === "track" ? "dirtroad" : "lane") : t.highway === "cycleway" ? "cycle" : t.highway === "pedestrian" ? "plaza" : t.highway === "steps" ? "steps" : "path";
       if (road && el.nodes) for (const id of el.nodes) {
         const nd = nodeUse.get(id) ?? { n: 0, w: 0, foot: false, y: 0, k: kind };
         nd.n++; nd.y = Math.max(nd.y, layer);

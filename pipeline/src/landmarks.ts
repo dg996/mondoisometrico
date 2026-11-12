@@ -81,6 +81,21 @@ export const LANDMARKS: Record<string, Landmark[]> = {
     // verified 2026-11-12: OSM way 23276946 (station building) centroid
     { name: "Termini", lat: 41.901184, lon: 12.501666, minPx: 0.08, groundMsl: 55 },
     { name: "Villa Borghese", lat: 41.914411, lon: 12.484844, minPx: 0.08, groundMsl: 49 },
+    {
+      // OSM way 134400816 (area:highway=steps) centroid
+      frontBearing: 225, paintRadiusM: 70, name: "Scalinata di Trinità dei Monti", lat: 41.905992, lon: 12.482784, minPx: 0.12, groundMsl: 30,
+      paintHint: "Spanish Steps / Scalinata di Trinità dei Monti (follow the exact outline and slope in image 1): a wide Baroque travertine staircase of 135 steps climbing from Piazza di Spagna (south-west, with the Barcaccia boat-shaped fountain at its foot) up to the twin-belltower church of Trinità dei Monti and its obelisk at the top (north-east); balustrades, landings and azaleas on the flights. Never a flat square.",
+    },
+    {
+      // OSM relation 2709954 centroid
+      paintRadiusM: 55, name: "Mausoleo di Augusto", lat: 41.906015, lon: 12.476425, minPx: 0.14, groundMsl: 18,
+      paintHint: "Mausoleum of Augustus (follow the exact circular OSM footprint): a huge round ruined drum of brick and travertine, concentric ring walls stepping inwards, grass and cypresses on the upper rings, set in the sunken restored Piazza Augusto Imperatore. It is NOT a round apartment block and has NO tiled roof.",
+    },
+    {
+      // OSM way 201293294 centroid
+      frontBearing: 250, paintRadiusM: 45, name: "Museo dell'Ara Pacis", lat: 41.906144, lon: 12.475459, minPx: 0.16, groundMsl: 18,
+      paintHint: "Museo dell'Ara Pacis (Richard Meier, 2006): a modern white travertine and glass pavilion with a flat roof and a long glass hall facing the Lungotevere (west), enclosing the marble altar. NOT a Roman palazzo, NO tiled roof.",
+    },
     { name: "Piazza del Popolo", lat: 41.910748, lon: 12.476365, minPx: 0.1, groundMsl: 18 },
     { name: "Campo de' Fiori", lat: 41.895577, lon: 12.472159, minPx: 0.14, groundMsl: 23 },
   ],

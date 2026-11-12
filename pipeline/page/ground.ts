@@ -15,11 +15,11 @@ const FILL: Record<string, string> = {
   farm: "#c9cd8c", dirt: "#d2b98f", cemetery: "#b2c798",
   park: "#9dcb6c", wood: "#73a851", scrub: "#adbb7b", sand: "#eedbab", pitch: "#6db35a", track: "#c97a5c",
   playground: "#dccba1", parking: "#bebcb7", paving: "#e6e0d4", water: "#3f95c2", pool: "#5ccbe6",
-  excavation: "#bfa27a",
+  excavation: "#bfa27a", stairs: "#ece6d8",
 };
 /** paint order of area kinds: broad landuse first, details on top */
 const AREA_ORDER = ["residential", "commercial", "industrial", "campus", "farm", "dirt", "cemetery", "scrub", "wood",
-  "park", "sand", "parking", "paving", "excavation", "pitch", "track", "playground", "water", "pool"];
+  "park", "sand", "parking", "paving", "stairs", "excavation", "pitch", "track", "playground", "water", "pool"];
 const BASE = "#d9d3c4";
 const SEA = "#2c80b2", SHALLOW = "#4ea6cb";
 const ASPHALT: Record<string, string> = { highway: "#6c7077", street: "#7b7e85", lane: "#8b8d91", dirtroad: "#c3ab82" };
@@ -107,6 +107,24 @@ export function drawGround(
 
   // 4. paths and plazas, then pavements under streets
   for (const f of [...of("path"), ...of("plaza"), ...of("cycle")]) stroke(f.l!, f.w!, PATHS[f.k]);
+  // stairs (Spanish Steps, Aracoeli, Campidoglio): light stone with a tread every 0.45 m across the flight
+  for (const f of of("steps")) {
+    const w = Math.max(f.w ?? 2.5, 2.5);
+    stroke(f.l!, w, "#ece6d8");
+    const l = f.l!;
+    ctx.strokeStyle = "rgba(120,108,90,0.55)"; ctx.lineWidth = 0.08; ctx.setLineDash([]);
+    for (let k = 1; k < l.length; k++) {
+      const [ax, ay] = l[k - 1], [bx, by] = l[k], L = Math.hypot(bx - ax, by - ay);
+      if (L < 0.2) continue;
+      const nx = -(by - ay) / L, ny = (bx - ax) / L;
+      ctx.beginPath();
+      for (let d = 0.2; d < L; d += 0.45) {
+        const cx = ax + (bx - ax) * d / L, cy = ay + (by - ay) * d / L;
+        ctx.moveTo(cx - nx * w / 2, cy - ny * w / 2); ctx.lineTo(cx + nx * w / 2, cy + ny * w / 2);
+      }
+      ctx.stroke();
+    }
+  }
   for (const f of of("pier")) stroke(f.l!, f.w!, "#d8d2c4");
   // Roads have butt ends: a round cap on a bridge end or a wide road's end bulges over whatever it
   // meets. Joins between ways are filled by junction disks instead, drawn in the junction's layer.

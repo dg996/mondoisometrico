@@ -67,6 +67,11 @@ function pick(list: Array<[string, number]>, u: number) {
 }
 
 const WORSHIP = ["cathedral", "church", "basilica", "chapel", "temple", "mosque", "synagogue", "monastery", "convent"];
+/** historic structures that are stone, never a plastered palazzo with a coppi roof */
+const STONE = ["tomb", "mausoleum", "ruins", "archaeological_site", "monument", "memorial", "city_gate", "citywalls",
+  "castle", "aqueduct", "temple", "tower", "pilar", "fort", "bridge"];
+/** modern landmarks the 2002 survey / OSM tags don't date: by name (verified buildings) */
+const MODERN_NAMES = /^(Museo dell'Ara Pacis|MAXXI|Auditorium Parco della Musica|Nuvola|Centro Congressi La Nuvola)/i;
 
 export interface RomanLook {
   style: number;
@@ -86,7 +91,15 @@ export function romanLook(t: Record<string, string>, historic: boolean, landmark
   if (["shed", "garage", "garages", "kiosk", "roof", "carport", "hut"].includes(t.building))
     return { style: ROMA_STYLE.shed, wallColor: "#c9c0b0", roofColor: "#a8a196", roof: 0, floor: 3 };
   const worship = WORSHIP.includes(t.building) || t.amenity === "place_of_worship";
-  if (landmark || worship || t.historic === "monument" || t.historic === "memorial")
+  // modern buildings (built 1950+, tagged modern/contemporary, or a verified modern landmark): white
+  // travertine and glass, flat roofs — not Roman plaster (Ara Pacis museum, MAXXI, Auditorium)
+  const year = parseInt(t.start_date ?? t["building:start_date"] ?? "", 10);
+  if (!worship && (year >= 1950 || /modern|contemporary/i.test(t["building:architecture"] ?? "") || MODERN_NAMES.test(t.name ?? "")))
+    return { style: ROMA_STYLE.palazzina, wallColor: "#ebe8e0", roofColor: "#d6d2c8", roof: 0, floor: 3.4 };
+  // medieval towers and tower houses are brick (Torre delle Milizie, Torre dei Conti, Torre del Papito)
+  if (t.historic === "tower" || t.historic === "tower_house" || t.man_made === "tower" && t.historic)
+    return { style: ROMA_STYLE.travertino, wallColor: "#a96a45", roofColor: "#8e5a40", roof: 0, floor: 4 };
+  if (landmark || worship || STONE.includes(t.historic))
     // churches: coppi over the nave; monuments (Colosseo, arches, mausolea): stone tops, not roof tiles
     return { style: ROMA_STYLE.travertino, wallColor: TRAVERTINO, roofColor: worship ? TRAVERTINO_ROOF : "#cbbfa6", roof: worship ? 3.5 : 0, floor: 4.5 };
   if (historic)
