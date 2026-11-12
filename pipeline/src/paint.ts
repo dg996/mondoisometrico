@@ -34,9 +34,9 @@ const STYLE = join(PIPELINE, "style", "reference.png");
 const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
 const SEA = join(PIPELINE, "style", "sea.png");
 /** Registration floor; landmarks do not get an exception to geometric alignment. */
-const MIN_MATCH = 0.4;
+const MIN_MATCH = 0.45;
 /** Below MIN_MATCH but above this, the best attempt is kept and flagged .soft for later repaint. */
-const SOFT_MATCH = 0.3;
+const SOFT_MATCH = 0.32;
 /** Below this share of strong edges in the render (sea, sand, empty lots) the match check is skipped. */
 const MIN_TEXTURE = 0.05;
 
@@ -517,9 +517,7 @@ async function paintWindow(i: number, j: number) {
           bestR = r;
         }
         console.warn(`  ${i}_${j}: rejected attempt ${attempt}, match=${r.score.toFixed(2)}`);
-        // Speed: if attempt 2 is still below MIN_MATCH but we have a recognisable best,
-        // soft-accept it now instead of burning a third generation on a plateau.
-        if (attempt >= 2 && bestR && bestR.score >= SOFT_MATCH) break;
+        // Use all 3 attempts before soft-accept — early bail was a speed hack that hurt look.
         continue;
       }
       const warp = structured && r.score > r.identity + 0.01;
