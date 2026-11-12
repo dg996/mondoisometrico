@@ -17,6 +17,8 @@
     "dev": "npm -w web run dev",
     "build": "npm -w web run build",
     "typecheck": "npm -w pipeline run typecheck && npm -w web run astro -- check",
+    "resume:roma-inner": "npm -w pipeline run resume-roma-inner --",
+    "qa:roma": "npm -w pipeline run resume-roma-inner -- --check",
     "publish": "npm -w pipeline run publish --",
     "deploy": "npm run build && npm -w pipeline exec tsx src/deploy.ts"
   },

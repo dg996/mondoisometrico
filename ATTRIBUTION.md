@@ -40,7 +40,8 @@ Nessuno di questi dati è nel repository: `npm run fetch` li scarica in `data/` 
 
 ## Dipingere con AI
 
-I tile del render vengono ripittati dal modello immagini di OpenAI tramite Codex CLI (account ChatGPT).
+I tile del render vengono ripittati dal modello immagini di OpenAI tramite Codex CLI (account ChatGPT)
+oppure, con `PAINT_BACKEND=agentgw`, dal servizio di generazione immagini agent-gw (Kimi).
 I termini OpenAI assegnano i diritti sull’output all’utente. Nessun credito obbligatorio; mappa e clip
 dicono "Painted with AI" perché le piattaforme sociali chiedono di etichettare i contenuti AI.
 

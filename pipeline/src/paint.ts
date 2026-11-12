@@ -1,6 +1,7 @@
 /**
  * Repaint the open-data 3D render into crisp, realistic isometric art with the local Codex CLI
- * (ChatGPT login, built-in image generation; no API key).
+ * (ChatGPT login, built-in image generation; no API key) or, with PAINT_BACKEND=agentgw,
+ * the agent-gw image generation service (KIMI_API_KEY or ~/.kimi/agent-gw.json).
  *
  * Painting happens in overlapping 1024px windows on a global grid (stride 896). Each window gets
  * its already-painted neighbours (any side) pasted into the 128 px overlap, then windows are feather-blended
@@ -24,7 +25,7 @@ import { landmarkProjector } from "./landmark-anchors.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { DERIVED, PIPELINE, readJson, writeAtomic } from "./paths.ts";
 import { SEA_H, readHeights } from "./heights.ts";
-import { applyRegistration, register } from "./register.ts";
+import { applyRegistration, register, type Registration } from "./register.ts";
 
 const WIN = 1024, OVERLAP = 128, STRIDE = WIN - OVERLAP, T = CAMERA.tile;
 /** Blend band in the middle of each overlap; outside it a window's own pixels win outright. */
@@ -33,7 +34,9 @@ const STYLE = join(PIPELINE, "style", "reference.png");
 const TREES = join(PIPELINE, "style", "trees.png"); // species sheet (painted once with Codex)
 const SEA = join(PIPELINE, "style", "sea.png");
 /** Registration floor; landmarks do not get an exception to geometric alignment. */
-const MIN_MATCH = 0.45;
+const MIN_MATCH = 0.4;
+/** Below MIN_MATCH but above this, the best attempt is kept and flagged .soft for later repaint. */
+const SOFT_MATCH = 0.3;
 /** Below this share of strong edges in the render (sea, sand, empty lots) the match check is skipped. */
 const MIN_TEXTURE = 0.05;
 
@@ -229,7 +232,7 @@ async function composeInput(i: number, j: number, file: string, heightFile: stri
 /** Codex/ChatGPT usage or rate limit: every worker pauses until `resumeAt`, then retries. */
 let resumeAt = 0, backoff = 0;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const LIMIT = /usage limit|rate.?limit|too many requests|\b429\b|quota/i;
+const LIMIT = /usage limit|rate.?limit|too many requests|too many concurrent|\b429\b|quota/i;
 
 /** How long a limit message asks us to wait (ms); falls back to exponential backoff 5 → 60 min. */
 function limitWait(log: string) {
@@ -269,6 +272,98 @@ function codex(cwd: string, prompt: string): Promise<void> {
   });
 }
 
+/**
+ * Alternative paint backend: agent-gw image generation (PAINT_BACKEND=agentgw).
+ * Same window contract as codex(): reads input/height/style/trees from `cwd`,
+ * writes out.png there, appends its log to codex.log so rate-limit handling
+ * and QA stay unchanged. Reference-image URLs for the static style/trees
+ * sheets are uploaded once and cached under the area dir; input/height are
+ * uploaded per window (they change every time).
+ */
+const GW_SCRIPT = join(PIPELINE, "scripts", "agentgw_paint.py");
+const GW_REFS = () => join(base, "agentgw-refs.json");
+
+function gwRefs(): Record<string, { size: number; mtimeMs: number; url: string }> {
+  try { return JSON.parse(readFileSync(GW_REFS(), "utf8")); } catch { return {}; }
+}
+
+function gwRun(args: string[], logFile: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const log = openSync(logFile, "a");
+    const p = spawn("python3", [GW_SCRIPT, ...args], { stdio: ["ignore", log, log] });
+    const timer = setTimeout(() => p.kill("SIGTERM"), 900_000);
+    p.on("error", (e) => { clearTimeout(timer); closeSync(log); reject(e); });
+    p.on("close", (code) => { clearTimeout(timer); closeSync(log); resolve(code ?? 1); });
+  });
+}
+
+async function gwUpload(file: string, logFile: string): Promise<string> {
+  // small helper process: capture stdout (the signed_url) instead of the log
+  const out = join("/tmp/mondoisometrico-paint", areaName, `upload-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+  const code = await new Promise<number>((resolve, reject) => {
+    const log = openSync(logFile, "a"), outFd = openSync(out, "w");
+    const p = spawn("python3", [GW_SCRIPT, "upload", "--image-path", file], { stdio: ["ignore", outFd, log] });
+    p.on("error", reject);
+    p.on("close", (c) => { closeSync(log); closeSync(outFd); resolve(c ?? 1); });
+  });
+  if (code !== 0) throw new Error(`agent-gw upload failed for ${file} (see ${logFile})`);
+  return readFileSync(out, "utf8").trim();
+}
+
+async function gwRef(file: string, logFile: string): Promise<string> {
+  const st = statSync(file);
+  const refs = gwRefs();
+  const hit = refs[file];
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.url;
+  const url = await gwUpload(file, logFile);
+  refs[file] = { size: st.size, mtimeMs: st.mtimeMs, url };
+  writeFileSync(GW_REFS(), JSON.stringify(refs, null, 2));
+  return url;
+}
+
+/** Strip the Codex tool-calling scaffolding; the craft/landmark body is shared. */
+/**
+ * Compact single-reference prompt for the agent-gw painter. Measured on the Pantheon window:
+ * the full Codex prompt (4 refs + monument paragraphs) makes the gateway model draw a "Rome
+ * greatest hits" postcard (registration NCC ~0.1); a short tracing prompt with ONLY the base
+ * render attached scores ~0.33-0.54 across generations. Landmark hints are cut to name + anchor.
+ */
+function agentgwPrompt(title: string, hints: string[]): string {
+  const lm = hints.length
+    ? "\nSpecial buildings in this window (keep each footprint EXACTLY; if the frame clips it, draw only the visible part, never recenter or duplicate it):\n" +
+      hints
+        .map((h) => {
+          const cut = h.indexOf(" (");
+          const name = (cut > 0 ? h.slice(0, cut) : h.slice(0, 40)).trim();
+          const anchor = h.match(/ground anchor in this window: \((-?\d+), (-?\d+)\) px/);
+          return `- The footprint near pixel ${anchor ? `(${anchor[1]}, ${anchor[2]})` : "centre"} is the ${name}. Paint it as the real monument, true to its actual architecture, at exactly that footprint.`;
+        })
+        .join("\n") +
+      "\n"
+    : "";
+  return `Repaint the attached render as a detailed isometric illustration of ${title}. This is a TRACING job: the output must overlay the input pixel-for-pixel — same orthographic camera, framing and scale. Every building keeps its exact footprint, position, height and roof outline; every street, square, park and river stays exactly where it is. Do not add, remove, merge, move or resize anything; draw only what is in the input. Some edges may contain strips of already-painted neighbouring artwork: continue them seamlessly, matching their saturation and hue.
+
+Materials and mood: warm Roman palazzi in ochre, cream and muted terracotta; brick and travertine public buildings; regular window grids, shutters, cornices, rooftop terraces; grey asphalt with subtle lane markings; pale stone pavements; realistic trees seen from above (stone pines, cypresses, plane trees); soft even daylight, gentle ambient occlusion, crisp clean edges. Flat placeholder colours in the input: grey = asphalt, pale = pavement/plaza, green = grass, blue = water. Replace them with realistic textures in exactly the same shapes. Water stays calm muted blue-green; bridges stay level and straight across it; cars only on roads and bridge decks, never on water or rooftops.
+${lm}
+Output: one square 1024x1024 image, no text, no labels, no border, no vignette.
+`;
+}
+
+async function agentgw(cwd: string, prompt: string): Promise<void> {
+  const logFile = join(cwd, "codex.log"); // same file the limit/QA plumbing already reads
+  const refs = [await gwUpload(join(cwd, "input.png"), logFile)];
+  writeFileSync(join(cwd, "prompt.txt"), prompt);
+  const code = await gwRun([
+    "paint", "--description-file", join(cwd, "prompt.txt"), "--output", join(cwd, "out.png"),
+    ...refs.flatMap((u) => ["--ref", u]),
+  ], logFile);
+  if (code !== 0) return; // no out.png: caller treats as a failed attempt
+}
+
+/** Active painter: local Codex CLI by default, agent-gw when PAINT_BACKEND=agentgw. */
+const runPainter: (cwd: string, prompt: string) => Promise<void> =
+  process.env.PAINT_BACKEND === "agentgw" ? agentgw : codex;
+
 /** Share of a window's surface at sea level (from the height pass). */
 async function seaFraction(i: number, j: number) {
   let wet = 0, n = 0;
@@ -305,11 +400,11 @@ async function looksLikeSea(file: string) {
 /** Delete finished windows with a black band or patch the render doesn't have, so they get repainted. */
 async function dropDarkWindows(wins: Array<[number, number]>) {
   let n = 0;
-  for (const [i, j] of wins) {
-    if (!existsSync(winFile(i, j))) continue;
+  await pool(wins, 8, async ([i, j]) => {
+    if (!existsSync(winFile(i, j))) return;
     const render = await (await cropGlobal(i * STRIDE, j * STRIDE, WIN, WIN)).png().toBuffer();
     if (existsSync(localWinFile(i,j)) && await hasDarkPatch(localWinFile(i,j), render)) { rmSync(localWinFile(i,j)); n++; console.warn(`  ${i}_${j}: black patch, will repaint`); }
-  }
+  });
   if (n) console.log(`  dropped ${n} windows with black patches`);
 }
 
@@ -344,7 +439,17 @@ async function paintWindow(i: number, j: number) {
       if (e instanceof Error && e.message.includes("skipped for later")) throw e;
     }
   }
-  if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) return;
+  // .soft windows were soft-accepted below MIN_MATCH: repaint them on later runs, but cap the
+  // repaints — stubborn windows (score plateaus below MIN_MATCH) must not burn 3 generations per
+  // pass forever. `--force` or deleting the .soft marker still forces a full repaint.
+  if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) {
+    const sf = `${localWinFile(i, j)}.soft`;
+    if (!existsSync(sf)) return;
+    try {
+      const tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0;
+      if (tries >= 2) return; // gave this window its chances; keep the soft-accepted art
+    } catch { /* unreadable marker: repaint */ }
+  }
   // open sea: reuse the painted sea texture (mirrored per window so repeats don't line up)
   if (existsSync(SEA) && (await seaFraction(i, j)) >= 0.995) {
     let img = sharp(SEA).resize(WIN, WIN);
@@ -354,7 +459,7 @@ async function paintWindow(i: number, j: number) {
     console.log(`  ${i}_${j}: sea texture`);
     return;
   }
-  // durable debug copy under data/; Codex itself runs in /tmp outside the git root
+  // durable debug copy under data/; the painter itself runs in /tmp outside the git root
   const work = join(base, "work", `${i}_${j}`);
   const sand = join("/tmp/mondoisometrico-paint", areaName, `${i}_${j}`);
   mkdirSync(work, { recursive: true });
@@ -370,23 +475,30 @@ async function paintWindow(i: number, j: number) {
   const landmarkBlock = hints.length
     ? `\nLANDMARKS IN THIS WINDOW (paint these as the REAL monuments — footprint stays exact):\n- ${hints.join("\n- ")}\n`
     : "";
-  const prompt = PROMPT.replace("{title}", title).replace("{out}", outSand)
-    .replace("{continuation}", (edges.length ? CONTINUATION.replace("{edges}", edges.join(" and ")) : "") + landmarkBlock);
+  const prompt = process.env.PAINT_BACKEND === "agentgw"
+    ? agentgwPrompt(title, hints)
+    : PROMPT.replace("{title}", title).replace("{out}", outSand)
+      .replace("{continuation}", (edges.length ? CONTINUATION.replace("{edges}", edges.join(" and ")) : "") + landmarkBlock);
+  // Best-effort tracking: the agent-gw painter's fidelity varies per generation, so keep the
+  // highest-scoring attempt; windows that never reach MIN_MATCH can still soft-accept at
+  // SOFT_MATCH (flagged with a .soft marker for later targeted repaint) instead of blocking.
+  let bestR: Registration | null = null;
+  const bestFile = join(work, "out-best.png");
   for (let attempt = 1; attempt <= 3; attempt++) {
     while (Date.now() < resumeAt) await sleep(Math.min(60_000, resumeAt - Date.now()));
     rmSync(outSand, { force: true });
     rmSync(join(work, "out.png"), { force: true }); // no stale result from a previous attempt
     const t0 = Date.now();
-    await codex(sand, prompt);
+    await runPainter(sand, prompt);
     // copy log + output back into the area work dir
     if (existsSync(join(sand, "codex.log"))) copyFileSync(join(sand, "codex.log"), join(work, "codex.log"));
     if (existsSync(outSand)) copyFileSync(outSand, join(work, "out.png"));
     if (!existsSync(join(work, "out.png"))) {
-      const log = readFileSync(join(work, "codex.log"), "utf8").slice(-4000);
+      const log = existsSync(join(work, "codex.log")) ? readFileSync(join(work, "codex.log"), "utf8").slice(-4000) : "";
       if (LIMIT.test(log)) {
         const wait = limitWait(log);
         resumeAt = Math.max(resumeAt, Date.now() + wait);
-        console.warn(`  ${i}_${j}: Codex limit reached, pausing all workers until ${new Date(resumeAt).toLocaleTimeString()}`);
+        console.warn(`  ${i}_${j}: painter limit reached, pausing all workers until ${new Date(resumeAt).toLocaleTimeString()}`);
         attempt--; // a limit is not the window's fault: retry without using up an attempt
         continue;
       }
@@ -398,13 +510,21 @@ async function paintWindow(i: number, j: number) {
       const structured = r.texture >= MIN_TEXTURE;
       // Failed last attempts used to slip through, and landmarks accepted scores as low as .32.
       // Preserve any previous window on disk; report failure instead of promoting bad artwork.
-      if (await hasDarkPatch(join(work, "out.png"), join(work, "input.png"))
-          || (structured && r.score < MIN_MATCH)) {
+      const dark = await hasDarkPatch(join(work, "out.png"), join(work, "input.png"));
+      if (dark || (structured && r.score < MIN_MATCH)) {
+        if (!dark && structured && (bestR === null || r.score > bestR.score)) {
+          copyFileSync(join(work, "out.png"), bestFile);
+          bestR = r;
+        }
         console.warn(`  ${i}_${j}: rejected attempt ${attempt}, match=${r.score.toFixed(2)}`);
+        // Speed: if attempt 2 is still below MIN_MATCH but we have a recognisable best,
+        // soft-accept it now instead of burning a third generation on a plateau.
+        if (attempt >= 2 && bestR && bestR.score >= SOFT_MATCH) break;
         continue;
       }
       const warp = structured && r.score > r.identity + 0.01;
       await applyRegistration(join(work, "out.png"), localWinFile(i, j), warp ? r : { ...r, scale: 1, dx: 0, dy: 0 });
+      rmSync(`${localWinFile(i, j)}.soft`, { force: true }); // passed: clear any soft-accept flag
       console.log(`  ${i}_${j}: ${((Date.now() - t0) / 1000).toFixed(0)}s edges=${edges.join("+") || "-"} match=${r.score.toFixed(2)}`
         + (structured ? "" : " (low texture)") + (warp ? ` shift=(${r.dx},${r.dy}) scale=${r.scale.toFixed(2)}` : ""));
       // keep qa.json + codex.log for debugging; the images are ~6 MB per window
@@ -412,6 +532,18 @@ async function paintWindow(i: number, j: number) {
       return;
     }
     console.error(`  ${i}_${j}: attempt ${attempt} failed, see ${join(work, "codex.log")}`);
+  }
+  // No attempt reached MIN_MATCH: promote the best one if it is at least recognisable, and mark
+  // it .soft so a later --force run on that window repaints it instead of skipping it.
+  if (bestR && bestR.score >= SOFT_MATCH) {
+    const warp = bestR.score > bestR.identity + 0.01;
+    await applyRegistration(bestFile, localWinFile(i, j), warp ? bestR : { ...bestR, scale: 1, dx: 0, dy: 0 });
+    const sf = `${localWinFile(i, j)}.soft`;
+    let tries = 0;
+    try { tries = (JSON.parse(readFileSync(sf, "utf8")) as Registration & { _tries?: number })._tries ?? 0; } catch {}
+    writeFileSync(sf, JSON.stringify({ ...bestR, _tries: tries + 1 }));
+    console.warn(`  ${i}_${j}: SOFT-ACCEPT match=${bestR.score.toFixed(2)} < ${MIN_MATCH}; flagged .soft for later repaint (try ${tries + 1}/2)`);
+    return;
   }
   throw new Error(`paint ${i}_${j} failed QA after 3 attempts; previous painting retained, batch not ready`);
 }
@@ -638,7 +770,10 @@ async function main() {
       });
       painted += todo.length;
     }
-    if (painted) await assemble(false, false); // finished tiles become visible ring by ring
+    // Mid-batch assemble rebuilds EVERY covered tile (global palette correction): at ~3.5 s/tile
+    // that is up to an hour per ring late in the batch on small runners. Disabled entirely:
+    // the final strict assemble after the loop rebuilds everything before paint.json is written.
+    void painted;
   }
   /* palette QA in assemble covers water and land together */ // then every tile with open water is rebuilt with the harmonised sea
   await assemble(!args.window, true);

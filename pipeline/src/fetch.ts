@@ -11,7 +11,7 @@
  *                                        coastline, rail (bbox + margin, drawn onto the terrain)
  * data/raw/dem/*.tif                     Copernicus GLO-30 elevation (1°×1° tiles, AWS open data)
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openArea } from "./areas.ts";
 import { RAW } from "./paths.ts";
@@ -59,32 +59,87 @@ async function arcgis(layer: number, bbox: [number, number, number, number], fie
   return { type: "FeatureCollection", features: [...seen.values()] };
 }
 
+// Only mirrors observed serving live data. overpass-api.de gzips responses
+// (10x smaller over the wire) and has the freshest DB, but 502s under load;
+// overpass.openstreetmap.fr does not gzip and streams large responses at
+// ~7 KB/s from our runners. kumi/private.coffee/mail.ru time out or 5xx from
+// our runners and would burn whole client timeouts per attempt.
+// NOTE: overpass.osm.ch is deliberately excluded — it answers 200 from a
+// broken/empty database (bogus timestamp_osm_base, zero elements for central
+// Rome), which would poison the raw cache with empty files.
 const OVERPASS = [
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.openstreetmap.fr/api/interpreter",
 ];
 
 async function overpass(query: string) {
   let last = "";
-  for (let attempt = 1; attempt <= 8; attempt++) {
+  for (let attempt = 1; attempt <= 16; attempt++) {
     const url = OVERPASS[(attempt - 1) % OVERPASS.length];
     try {
       const r = await fetch(url, {
-        method: "POST", headers: { ...UA, "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST", headers: { ...UA, "Content-Type": "application/x-www-form-urlencoded", "Accept-Encoding": "gzip" },
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(180_000),
+        // Cells carry [timeout:120] server-side; no point waiting much longer.
+        signal: AbortSignal.timeout(150_000),
       });
-      if (r.ok) return r.json();
-      last = `${r.status} ${url}`;
-      console.warn(`  overpass ${r.status} (${new URL(url).host}), retrying…`);
+      if (r.ok) {
+        const j = await r.json();
+        // Guard against mirrors that answer 200 from a stale/empty DB: a live
+        // Overpass always reports an ISO timestamp_osm_base. Treat anything
+        // else as a failed attempt so we never cache a poisoned empty result.
+        const ts = j?.osm3s?.timestamp_osm_base ?? "";
+        if (!/^\d{4}-\d{2}-\d{2}T/.test(ts)) {
+          last = `stale-db ${url} (timestamp_osm_base=${ts || "missing"})`;
+          console.warn(`  overpass mirror has no live DB (${new URL(url).host}), trying next…`);
+        } else {
+          return j;
+        }
+      } else {
+        last = `${r.status} ${url}`;
+        console.warn(`  overpass ${r.status} (${new URL(url).host}), retrying…`);
+      }
     } catch (err) {
       last = `${err} ${url}`;
       console.warn(`  overpass error (${new URL(url).host}), retrying…`);
     }
-    await new Promise((res) => setTimeout(res, 5_000 * attempt));
+    await new Promise((res) => setTimeout(res, Math.min(5_000 * attempt, 20_000)));
   }
   throw new Error(`overpass failed: ${last}`);
+}
+
+/**
+ * Run an Overpass query over a grid of bbox cells and merge the results.
+ * Full-area bboxes (roma-inner is ~8×10 km) exceed every public mirror's
+ * timeout; 0.03° cells answer in seconds. Elements are deduped by type/id
+ * (ways/relations crossing cell borders appear in several cells).
+ * Each cell is cached under data/raw/.cells/<cacheKey>/ so a crash on cell N
+ * of M does not re-fetch the N-1 cells already done.
+ */
+async function overpassGrid(cacheKey: string, query: (b: string) => string, [s, w, n, e]: [number, number, number, number], step = 0.03) {
+  const cells: Array<[number, number, number, number]> = [];
+  for (let la = s; la < n - 1e-9; la += step)
+    for (let lo = w; lo < e - 1e-9; lo += step)
+      cells.push([la, lo, Math.min(n, la + step), Math.min(e, lo + step)]);
+  const cacheDir = join(RAW, ".cells", cacheKey);
+  mkdirSync(cacheDir, { recursive: true });
+  const seen = new Map<string, unknown>();
+  let base: any = null;
+  for (const [i, [cs, cw, cn, ce]] of cells.entries()) {
+    const cellFile = join(cacheDir, `cell-${i}.json`);
+    let data: any;
+    if (existsSync(cellFile)) {
+      data = JSON.parse(readFileSync(cellFile, "utf8"));
+    } else {
+      data = await overpass(query(`(${cs},${cw},${cn},${ce})`));
+      writeFileSync(cellFile, JSON.stringify(data));
+    }
+    base ??= data;
+    for (const el of data.elements ?? []) seen.set(`${el.type}/${el.id}`, el);
+    process.stdout.write(`\r  overpass cell ${i + 1}/${cells.length}, ${seen.size} elements  `);
+  }
+  process.stdout.write("\n");
+  return { ...base, elements: [...seen.values()] };
 }
 
 const name = process.argv[2] ?? "roma-core";
@@ -107,10 +162,8 @@ if (!existsSync(join(dir, "tlv_canopy.geojson"))) {
   ));
 }
 if (!existsSync(join(dir, "osm.json"))) {
-  const [s, w, n, e] = area.bbox;
-  const b = `(${s},${w},${n},${e})`;
   // buildings + trees; also fountains / named monuments without building=* (Fontana di Trevi, etc.)
-  const data = await overpass(`[out:json][timeout:300];
+  const data = await overpassGrid(`${name}-osm`, (b) => `[out:json][timeout:120];
 (
   way["building"]${b};
   relation["building"]${b};
@@ -121,30 +174,27 @@ if (!existsSync(join(dir, "osm.json"))) {
   nwr["historic"~"^(monument|memorial|ruins|archaeological_site|castle|citywalls)$"]${b};
   nwr["tourism"="attraction"]["name"]${b};
 );
-out body geom;`);
+out body geom;`, area.bbox);
   writeFileSync(join(dir, "osm.json"), JSON.stringify(data));
   console.log(`  osm: ${data.elements.length} elements`);
 }
 // Backfill detailed geometry even when an older osm.json is already cached; preserve that cache.
 if (!existsSync(join(dir,"building-parts.json"))) {
-  const [s,w,n,e]=area.bbox, b=`(${s},${w},${n},${e})`;
-  const data=await overpass(`[out:json][timeout:300];(way["building:part"]["building:part"!="no"]${b};relation["building:part"]["building:part"!="no"]${b};);out body geom;`);
+  const data=await overpassGrid(`${name}-building-parts`, (b) => `[out:json][timeout:120];(way["building:part"]["building:part"!="no"]${b};relation["building:part"]["building:part"!="no"]${b};);out body geom;`, area.bbox);
   writeFileSync(join(dir,"building-parts.json"),JSON.stringify(data));
   console.log(`  building parts: ${data.elements.length} elements`);
 }
 if (!existsSync(join(dir, "roads.json"))) {
-  const [s, w, n, e] = area.bbox;
-  const data = await overpass(`[out:json][timeout:300];
-way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link|living_street|service)$"]["area"!="yes"](${s},${w},${n},${e});
-out body geom;`);
+  const data = await overpassGrid(`${name}-roads`, (b) => `[out:json][timeout:120];
+way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link|living_street|service)$"]["area"!="yes"]${b};
+out body geom;`, area.bbox);
   writeFileSync(join(dir, "roads.json"), JSON.stringify(data));
   console.log(`  roads: ${data.elements.length} ways`);
 }
 if (!existsSync(join(dir, "ground.json"))) {
   // Smaller margin for Rome test patches keeps Overpass under rate/size limits.
   const [s, w, n, e] = area.bbox, m = area.region === "roma-centro" ? 0.005 : 0.02;
-  const b = `(${s - m},${w - m},${n + m},${e + m})`;
-  const data = await overpass(`[out:json][timeout:300][maxsize:536870912];
+  const data = await overpassGrid(`${name}-ground`, (b) => `[out:json][timeout:120][maxsize:536870912];
 (
   way["highway"]["tunnel"!~"yes|building_passage"]${b};
   way["area:highway"]${b};
@@ -159,7 +209,7 @@ if (!existsSync(join(dir, "ground.json"))) {
   nwr["place"="square"]${b};
   nwr["tourism"="attraction"]["name"]${b};
 );
-out body geom;`);
+out body geom;`, [s - m, w - m, n + m, e + m]);
   writeFileSync(join(dir, "ground.json"), JSON.stringify(data));
   console.log(`  ground: ${data.elements.length} elements`);
 }

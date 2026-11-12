@@ -11,7 +11,9 @@
     "fetch": "tsx src/fetch.ts",
     "scene": "tsx src/scene.ts",
     "ground": "tsx src/ground.ts",
+    "prepublish": "tsx src/publish-guard.ts",
     "publish": "tsx src/publish.ts",
+    "resume-roma-inner": "tsx src/resume-roma-inner.ts",
     "og": "tsx src/og.ts"
   },
   "dependencies": {

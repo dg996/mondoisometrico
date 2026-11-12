@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { verifyWorldReferences } from "./publish-references.ts";
 
+// Child publisher processes still need the TS loader when the sandbox runs an older Node.
+const tsxLoader = import.meta.resolve("tsx");
+
 const base = "https://tiles.example/regions/roma-centro";
 const world = {
   files: {
@@ -106,7 +109,7 @@ for (const missing of [false, true]) {
           assert.ok(!existsSync('data/web/regions/roma-centro'));
         }
       `;
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      const result = spawnSync(process.execPath, ["--import", tsxLoader, "--input-type=module", "-e", script], {
         cwd: root, encoding: "utf8", timeout: 15_000,
         env: { ...process.env, TILES_ORIGIN: "https://tiles.example", CLOUDFLARE_ACCOUNT_ID: "fixture", CLOUDFLARE_API_TOKEN: "fixture" },
       });
