@@ -428,9 +428,9 @@ async function exportTransit(areas: string[], heights: Heights) {
   const decks = grids.flatMap((g) => g.bridges).map((l) => bridgeProfile(l, ground, wet)).filter((d): d is NonNullable<typeof d> => !!d);
   const painted = (e: number, n: number) => { const z = ground(e, n) ?? 60, [x, y] = enuToPixel([e, n, z]); return paintedArt.has(key(Math.floor(x / CAMERA.tile), Math.floor(y / CAMERA.tile))); };
   const toEnu = (lon: number, lat: number): [number, number] => { const p = ecefToEnu(llhToEcef(lat, lon, 0)); return [p[0], p[1]]; };
-  const lines = readTransit(feed, toEnu, painted);
+  const lines = await readTransit(feed, toEnu, painted);
   const trams: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }> = [];
-  const tramMeta: Array<{ n: string; d: number; h: number }> = [];
+  const tramMeta: Array<{ n: string; d: number; h: number; st: number[] }> = [];
   let tramNode = -1;
   for (const line of lines.filter((l) => l.kind === "tram")) {
     const s: number[] = [];
@@ -462,7 +462,7 @@ async function exportTransit(areas: string[], heights: Heights) {
     }
     if (s.filter((v, i) => i % 4 === 3 && v).length < 50) continue; // under 100 m visible: skip
     trams.push({ c: 2, o: 1, l: 1, w: 3, a: tramNode--, b: tramNode--, s });
-    tramMeta.push({ n: line.name, d: line.dir, h: line.headway });
+    tramMeta.push({ n: line.name, d: line.dir, h: line.headway, st: line.stops.flat() });
   }
   // bus guides: only the stretches within ~300 m of the painted area (the viewer's road graph is
   // limited to it anyway); a line leaving and re-entering gives several guides

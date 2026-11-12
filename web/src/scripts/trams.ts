@@ -11,11 +11,15 @@ import { drawCar } from "./vehicle-mesh.ts";
 const SUN: Vec3 = (() => { const v = [-0.55, -0.35, 0.76], L = Math.hypot(...v); return v.map((x) => x / L) as Vec3; })();
 
 type Vec3 = [number, number, number];
-export interface TramMeta { n: string; d: number; h: number }
+export interface TramMeta { n: string; d: number; h: number; /** stops, flat [e, n, e, n …] */ st?: number[] }
 interface Track { r: Road; n: number; cum: Float32Array; len: number; line: number }
-interface Tram { t: number; s: number; v: number }
+interface Tram { id: number; t: number; s: number; v: number; dwell: number; lastStop: number }
 
-const SPEED = 6.5, CAR = 11.2, GAP_CARS = 0.6, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
+const SPEED = 7, CAR = 11.2, GAP_CARS = 0.6, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
+const ACCEL = 1.1, BRAKE = 1.8;            // m/s² (low-floor tram)
+const LENGTH = CARS * CAR + (CARS - 1) * GAP_CARS;
+const SAFE = 12;                            // m kept free in front of a tram's nose
+const DWELL = 18;                           // s at a stop
 const BODY: [number, number, number] = [228, 226, 220];
 
 export class Trams {
@@ -24,7 +28,13 @@ export class Trams {
   clock: () => number = () => 12 * 60;
   drawn = 0;
 
-  constructor(tracks: Road[], private meta: TramMeta[], private enu2px: number[][], private camFwd: [number, number]) {
+  /** stop positions (distance along each track), from the GTFS stops of the line */
+  private stops: number[][] = [];
+  /** where two tracks cross or merge: per track the interval [from, to] occupied by the conflict, and
+   *  the tram holding it (−1 free) */
+  private zones: Array<{ on: Map<number, [number, number]>; holder: number }> = [];
+
+  constructor(tracks: Road[], private meta: TramMeta[], private enu2px: number[][], private camFwd: [number, number], stops: Array<Array<[number, number]>> = []) {
     for (const r of tracks) {
       const n = r.s.length / 4;
       if (n < 2) continue;
@@ -33,23 +43,125 @@ export class Trams {
       const line = (r as Road & { t?: number }).t ?? 0;
       if (cum[n - 1] < 120 || !meta[line]) continue;
       const t = this.tracks.push({ r, n, cum, len: cum[n - 1], line }) - 1;
-      const spacing = Math.max(220, meta[line].h * SPEED);
+      // stops of this line that lie on this stretch (within 8 m of the track), as distances along it
+      const here: number[] = [];
+      const own = stops[line] ?? (meta[line].st ? Array.from({ length: meta[line].st!.length / 2 }, (_, i) => [meta[line].st![i * 2], meta[line].st![i * 2 + 1]] as [number, number]) : []);
+      for (const [e, no] of own) {
+        let best = -1, bd = 8;
+        for (let i = 0; i < n; i++) { const d = Math.hypot(r.s[i * 4] - e, r.s[i * 4 + 1] - no); if (d < bd) { bd = d; best = cum[i]; } }
+        if (best > LENGTH) here.push(best);
+      }
+      this.stops[t] = here.sort((a, b) => a - b);
+      const spacing = Math.max(260, meta[line].h * SPEED);
       const count = Math.max(1, Math.round(cum[n - 1] / spacing));
-      for (let k = 0; k < count; k++) this.trams.push({ t, s: (k / count) * cum[n - 1], v: SPEED * (0.85 + 0.3 * ((k * 7919) % 13) / 13) });
+      for (let k = 0; k < count; k++) this.trams.push({ id: this.trams.length, t, s: (k / count) * cum[n - 1], v: SPEED * 0.6, dwell: 0, lastStop: -1 });
     }
+    this.findZones();
   }
 
   get count() { return this.trams.length; }
 
+  /** conflict zones between every pair of tracks: centre lines closer than 2.2 m (a crossing or a
+   *  shared stretch; the two directions of a line run ~3.5 m apart and never conflict), grown 3 m */
+  private findZones() {
+    const CELL = 8, grid = new Map<string, Array<[number, number]>>(); // cell -> [track, distance along]
+    this.tracks.forEach((tr, t) => { for (let i = 0; i < tr.n; i++) {
+      const k = `${Math.floor(tr.r.s[i * 4] / CELL)}_${Math.floor(tr.r.s[i * 4 + 1] / CELL)}`;
+      (grid.get(k) ?? grid.set(k, []).get(k)!).push([t, tr.cum[i]]);
+    } });
+    const hits = new Map<string, Array<[number, number]>>(); // "a|b" -> [sa, sb]
+    this.tracks.forEach((tr, a) => { for (let i = 0; i < tr.n; i++) {
+      const x = tr.r.s[i * 4], y = tr.r.s[i * 4 + 1], cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const [b, sb] of grid.get(`${cx + dx}_${cy + dy}`) ?? []) {
+        if (b <= a) continue;
+        const [bx, by] = this.pos(this.tracks[b], sb);
+        if (Math.hypot(bx - x, by - y) < 2.2) (hits.get(`${a}|${b}`) ?? hits.set(`${a}|${b}`, []).get(`${a}|${b}`)!).push([tr.cum[i], sb]);
+      }
+    } });
+    for (const [key, list] of hits) {
+      const [a, b] = key.split("|").map(Number);
+      list.sort((p, q) => p[0] - q[0]);
+      let cur: Array<[number, number]> = [];
+      const flush = () => {
+        if (!cur.length) return;
+        const sa = cur.map((p) => p[0]), sb = cur.map((p) => p[1]);
+        this.zones.push({ holder: -1, on: new Map([[a, [Math.min(...sa) - 3, Math.max(...sa) + 3]], [b, [Math.min(...sb) - 3, Math.max(...sb) + 3]]]) });
+        cur = [];
+      };
+      for (const p of list) { if (cur.length && p[0] - cur[cur.length - 1][0] > 6) flush(); cur.push(p); }
+      flush();
+    }
+  }
+
   /** trams run 5:30–24:00 */
   private running() { const m = this.clock(); return m >= 330 && m < 1440; }
 
+  /** raw position on a track (visibility ignored) — for spacing and crossings */
+  private pos(track: Track, s: number): [number, number] {
+    s = Math.max(0, Math.min(track.len, s));
+    let i = 1;
+    while (i < track.n - 1 && track.cum[i] < s) i++;
+    const S = track.r.s, f = (s - track.cum[i - 1]) / Math.max(1e-3, track.cum[i] - track.cum[i - 1]);
+    return [S[i * 4 - 4] + (S[i * 4] - S[i * 4 - 4]) * f, S[i * 4 - 3] + (S[i * 4 + 1] - S[i * 4 - 3]) * f];
+  }
+
+  /**
+   * Movement with real spacing: a tram brakes for any other tram's body in the stretch ahead of its
+   * nose (same line, other line, or crossing track); when two trams aim at each other's path the
+   * lower id goes first. Trams stop DWELL s at the line's real stops and accelerate / brake gently.
+   */
   step(dt: number) {
     dt = Math.min(dt, 0.1);
+    // world positions of every tram's body (nose, car centres, tail)
+    const bodies = this.trams.map((tr) => {
+      const track = this.tracks[tr.t], pts: Array<[number, number]> = [];
+      for (let o = 0; o <= LENGTH; o += 4) pts.push(this.pos(track, tr.s - o));
+      return pts;
+    });
     for (const tr of this.trams) {
       const track = this.tracks[tr.t];
+      // free distance ahead: walk the track in 2 m steps until another tram's body is within 3 m
+      let free = SAFE + 40;
+      for (let o = 2; o <= SAFE + 40; o += 2) {
+        if (tr.s + o > track.len) break;
+        const [x, y] = this.pos(track, tr.s + o);
+        let hit = false;
+        for (let k = 0; k < this.trams.length && !hit; k++) {
+          if (k === tr.id) continue;
+          for (const [bx, by] of bodies[k]) if (Math.hypot(bx - x, by - y) < 2.4) { hit = true; break; } // oncoming trams pass at ~3.5 m
+        }
+        if (hit) { free = o; break; }
+      }
+      // conflict zones ahead: claim the zone early enough to stop before it; without the claim, stop short
+      const brakeDist = (tr.v * tr.v) / (2 * BRAKE) + SAFE + 6;
+      for (const z of this.zones) {
+        const iv = z.on.get(tr.t);
+        if (!iv) continue;
+        const [z0, z1] = iv;
+        if (z.holder === tr.id) { if (tr.s - LENGTH > z1) z.holder = -1; continue; }   // tail cleared: release
+        if (tr.s > z1 || z0 - tr.s > brakeDist + 40) continue;                         // behind us / far ahead
+        const occupied = this.trams.some((o) => o.id !== tr.id && [...z.on].some(([t, [a0, a1]]) => o.t === t && o.s > a0 && o.s - LENGTH < a1));
+        if (z.holder < 0 && !occupied && tr.s < z0 && z0 - tr.s <= brakeDist + 40) z.holder = tr.id;
+        else if (z.holder !== tr.id) free = Math.min(free, Math.max(0, z0 - tr.s));
+      }
+      // next stop ahead on this stretch
+      const stop = (this.stops[tr.t] ?? []).find((p) => p > tr.s + 0.5 && p !== tr.lastStop);
+      if (tr.dwell > 0) { tr.dwell -= dt; tr.v = 0; continue; }
+      let target = SPEED;
+      const brakeTo = (d: number) => Math.sqrt(Math.max(0, 2 * BRAKE * Math.max(0, d)));
+      target = Math.min(target, brakeTo(free - SAFE));
+      if (stop !== undefined) {
+        target = Math.min(target, Math.max(0.6, brakeTo(stop - tr.s)));
+        if (stop - tr.s < 0.6) { tr.s = stop; tr.v = 0; tr.dwell = DWELL; tr.lastStop = stop; continue; }
+      }
+      tr.v = target > tr.v ? Math.min(target, tr.v + ACCEL * dt) : Math.max(target, tr.v - BRAKE * 2 * dt);
       tr.s += tr.v * dt;
-      if (tr.s > track.len) tr.s -= track.len; // leaves the visible stretch, a new tram enters at its start
+      if (tr.s > track.len) { // leaves the visible stretch: re-enters at its start once that is clear
+        const [sx, sy] = this.pos(track, 0);
+        // only trams on the same track can block the entry (oncoming ones run on their own track)
+        const clear = bodies.every((b, k) => k === tr.id || this.trams[k].t !== tr.t || b.every(([bx, by]) => Math.hypot(bx - sx, by - sy) > LENGTH + SAFE));
+        if (clear) { tr.s = 0; tr.lastStop = -1; } else { tr.s = track.len; tr.v = 0; }
+      }
     }
   }
 

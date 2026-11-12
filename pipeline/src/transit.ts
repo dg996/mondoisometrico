@@ -10,7 +10,8 @@
  * Frequency: trips of the route/direction on a reference service day, over 17 service hours.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 
 export const GTFS_URL = "https://dati.comune.roma.it/catalog/dataset/a7dadb4a-66ae-4eff-8ded-a102064702ba/resource/266d82e1-ba53-4510-8a81-370880c4678f/download/rome_static_gtfs.zip";
@@ -53,6 +54,8 @@ export interface TransitLine {
   headway: number;     // seconds between vehicles
   /** ENU polyline [e, n] every ~10 m (bus guide) */
   path: Array<[number, number]>;
+  /** ENU positions of the line's stops in order (trams: where they halt) */
+  stops: Array<[number, number]>;
 }
 
 /**
@@ -60,19 +63,20 @@ export interface TransitLine {
  * (YYYYMMDD; default: next Tuesday — a plain weekday). `keep` says whether an ENU point matters
  * (inside the painted area), so only lines that pass there are kept.
  */
-export function readTransit(feed: string, toEnu: (lon: number, lat: number) => [number, number],
-  keep: (e: number, n: number) => boolean, serviceDate?: string): TransitLine[] {
+export async function readTransit(feed: string, toEnu: (lon: number, lat: number) => [number, number],
+  keep: (e: number, n: number) => boolean, serviceDate?: string): Promise<TransitLine[]> {
   const date = serviceDate ?? (() => { const d = new Date(); d.setDate(d.getDate() + ((9 - d.getDay()) % 7 || 7)); return d.toISOString().slice(0, 10).replace(/-/g, ""); })();
   const services = new Set(csv(join(feed, "calendar_dates.txt")).filter((r) => r.date === date && r.exception_type === "1").map((r) => r.service_id));
   const routes = new Map(csv(join(feed, "routes.txt")).filter((r) => r.route_type === "0" || r.route_type === "3").map((r) => [r.route_id, r]));
   // trips per (route, direction): count, and the most used shape
-  const groups = new Map<string, { route: string; dir: number; trips: number; shapes: Map<string, number> }>();
+  const groups = new Map<string, { route: string; dir: number; trips: number; shapes: Map<string, number>; trip: Map<string, string> }>();
   for (const t of csv(join(feed, "trips.txt"))) {
     if (!routes.has(t.route_id) || !services.has(t.service_id) || !t.shape_id) continue;
     const k = `${t.route_id}|${t.direction_id}`;
-    const g = groups.get(k) ?? groups.set(k, { route: t.route_id, dir: Number(t.direction_id) || 0, trips: 0, shapes: new Map() }).get(k)!;
+    const g = groups.get(k) ?? groups.set(k, { route: t.route_id, dir: Number(t.direction_id) || 0, trips: 0, shapes: new Map(), trip: new Map() }).get(k)!;
     g.trips++;
     g.shapes.set(t.shape_id, (g.shapes.get(t.shape_id) ?? 0) + 1);
+    if (!g.trip.has(t.shape_id)) g.trip.set(t.shape_id, t.trip_id); // one representative trip per shape
   }
   const wanted = new Map<string, string>(); // shape_id -> group key
   for (const [k, g] of groups) wanted.set([...g.shapes].sort((a, b) => b[1] - a[1])[0][0], k);
@@ -82,6 +86,23 @@ export function readTransit(feed: string, toEnu: (lon: number, lat: number) => [
     if (!wanted.has(s.shape_id)) continue;
     (pts.get(s.shape_id) ?? pts.set(s.shape_id, []).get(s.shape_id)!).push([Number(s.shape_pt_sequence), Number(s.shape_pt_lon), Number(s.shape_pt_lat)]);
   }
+  // stops of the representative trip of every tram shape: stream stop_times (hundreds of MB)
+  const tramTrips = new Map<string, string>(); // trip_id -> shape_id
+  for (const [shape, k] of wanted) if (routes.get(groups.get(k)!.route)?.route_type === "0") tramTrips.set(groups.get(k)!.trip.get(shape)!, shape);
+  const tripStops = new Map<string, Array<[number, string]>>();
+  if (tramTrips.size) {
+    const rl = createInterface({ input: createReadStream(join(feed, "stop_times.txt")) });
+    let head: string[] | null = null;
+    for await (const line of rl) {
+      if (!head) { head = line.replace(/^\uFEFF/, "").split(","); continue; }
+      const comma = line.indexOf(","), trip = line.slice(0, comma).replace(/"/g, "");
+      if (head[0] !== "trip_id" || !tramTrips.has(trip)) continue;
+      const v = line.split(","), o: Record<string, string> = {};
+      head.forEach((h, i) => (o[h] = (v[i] ?? "").replace(/"/g, "")));
+      (tripStops.get(trip) ?? tripStops.set(trip, []).get(trip)!).push([Number(o.stop_sequence), o.stop_id]);
+    }
+  }
+  const stopPos = tramTrips.size ? new Map(csv(join(feed, "stops.txt")).map((st) => [st.stop_id, toEnu(Number(st.stop_lon), Number(st.stop_lat))])) : new Map<string, [number, number]>();
   const out: TransitLine[] = [];
   for (const [shape, k] of wanted) {
     const g = groups.get(k)!, route = routes.get(g.route)!, p = pts.get(shape);
@@ -100,7 +121,9 @@ export function readTransit(feed: string, toEnu: (lon: number, lat: number) => [
     const inside = path.filter(([e, n]) => keep(e, n)).length * 10;
     if (inside < 300) continue; // passes the painted area for less than 300 m
     const kind = route.route_type === "0" ? "tram" : "bus";
-    out.push({ name: route.route_short_name || route.route_id, kind, dir: g.dir, headway: Math.round(Math.max(120, (17 * 3600) / Math.max(1, g.trips))), path: path.map(([e, n]) => [Math.round(e * 10) / 10, Math.round(n * 10) / 10]) });
+    const st = (tripStops.get(g.trip.get(shape)!) ?? []).sort((a, b) => a[0] - b[0]).map(([, id]) => stopPos.get(id)).filter((p): p is [number, number] => !!p);
+    out.push({ name: route.route_short_name || route.route_id, kind, dir: g.dir, headway: Math.round(Math.max(120, (17 * 3600) / Math.max(1, g.trips))),
+      path: path.map(([e, n]) => [Math.round(e * 10) / 10, Math.round(n * 10) / 10]), stops: st.map(([e, n]) => [Math.round(e * 10) / 10, Math.round(n * 10) / 10]) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name, "it", { numeric: true }) || a.dir - b.dir);
 }
