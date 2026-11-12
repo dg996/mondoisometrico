@@ -38,17 +38,28 @@ interface Vehicle {
   len: number; wid: number; hei: number; color: [number, number, number]; bus: boolean;
   /** index into Traffic.guides when this bus runs a real line, else -1 */
   line: number;
+  kind?: "car" | "small" | "taxi" | "van";
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
 const CLASS_SPEED = [22, 13, 12, 11, 8, 5]; // m/s (≈ 80, 47, 43, 40, 29, 18 km/h)
 const ACCEL = 2.2, BRAKE = 5.5;              // m/s²
 const GAP = 2.2, HEADWAY = 1.1;              // standstill gap (m), time gap (s)
+/** Rome's car park, roughly: white, silver/grey and black dominate, a few blues, reds, greens */
 const CAR_COLORS: Array<[number, number, number]> = [
-  [236, 236, 236], [236, 236, 236], [190, 194, 200], [60, 62, 68], [36, 38, 44], [170, 40, 38],
-  [40, 80, 150], [235, 190, 40], [120, 130, 140], [210, 210, 214],
+  [238, 238, 236], [238, 238, 236], [238, 238, 236], [196, 199, 204], [196, 199, 204], [128, 132, 138],
+  [44, 46, 50], [44, 46, 50], [38, 62, 112], [164, 34, 36], [92, 104, 74], [214, 206, 188],
 ];
-const BUS_COLORS: Array<[number, number, number]> = [[40, 110, 190], [30, 150, 90], [220, 220, 222]];
+/** the render's sun (page/renderer.ts SUN), normalised: vehicles lit like the buildings */
+const SUN: Vec3 = (() => { const v = [-0.55, -0.35, 0.76], L = Math.hypot(...v); return v.map((x) => x / L) as Vec3; })();
+/** pick a vehicle type: [kind, length, width, height] (city cars, family cars, taxis, white vans) */
+function carType(r: () => number): { kind: "car" | "small" | "taxi" | "van"; len: number; wid: number; hei: number } {
+  const u = r();
+  if (u < 0.16) return { kind: "small", len: 3.0 + r() * 0.7, wid: 1.62, hei: 1.5 };
+  if (u < 0.24) return { kind: "taxi", len: 4.4 + r() * 0.3, wid: 1.8, hei: 1.55 };
+  if (u < 0.32) return { kind: "van", len: 5.1 + r() * 0.8, wid: 2.0, hei: 2.3 };
+  return { kind: "car", len: 3.7 + r() * 0.9, wid: 1.74, hei: 1.48 };
+}
 /** ATAC fleet: mostly red, some white/grey (illustrative livery, not per vehicle) */
 const ATAC_COLORS: Array<[number, number, number]> = [[178, 34, 42], [178, 34, 42], [178, 34, 42], [222, 222, 220]];
 const GUIDE_CELL = 25, OFF_ROUTE = 16, BUS_SPEED = 6; // m, m, m/s average incl. stops
@@ -103,7 +114,8 @@ export class Traffic {
       const way = this.ways[w];
       const dir: 1 | -1 = way.r.o === 1 ? 1 : way.r.o === -1 ? -1 : this.rand() < 0.5 ? 1 : -1;
       const bus = !lines.length && way.r.c <= 2 && this.rand() < 0.08; // real lines replace random buses
-      const len = bus ? 13.5 : 5.6 + this.rand() * 0.7;
+      const type = carType(this.rand);
+      const len = bus ? 12 : type.len;
       if (way.len < len + 4) continue;
       // skip ways that are mostly occluded / water-hidden (cars must not spawn in the river)
       if (this.wayVisible(way) < 0.55) continue;
@@ -116,8 +128,9 @@ export class Traffic {
       const v: Vehicle = {
         id: i++, w, dir, s, lane, bus, len, stuck: 0, through: false, holding: -1, next: null, line: -1,
         cruise: 0.8 + this.rand() * 0.35, phase: this.rand() * Math.PI * 2, v: 0,
-        wid: bus ? 2.7 : 2.15, hei: bus ? 3.2 : 1.65,
-        color: bus ? BUS_COLORS[Math.floor(this.rand() * BUS_COLORS.length)] : CAR_COLORS[Math.floor(this.rand() * CAR_COLORS.length)],
+        wid: bus ? 2.55 : type.wid, hei: bus ? 3.1 : type.hei, kind: bus ? undefined : type.kind,
+        color: bus ? ATAC_COLORS[Math.floor(this.rand() * ATAC_COLORS.length)]
+          : type.kind === "taxi" || type.kind === "van" ? [238, 238, 236] : CAR_COLORS[Math.floor(this.rand() * CAR_COLORS.length)],
       };
       v.v = this.limit(v) * 0.8;
       this.vehicles.push(v);
@@ -186,7 +199,7 @@ export class Traffic {
         }
       }
       if (!pick) continue;
-      const len = 12, way = this.ways[pick.w];
+      const len = this.guides[g].line.h <= 480 && (g + Math.floor(f * 10)) % 3 === 0 ? 18 : 12, way = this.ways[pick.w]; // busiest lines: some articulated
       const s = Math.max(len / 2 + 1, Math.min(way.len - len / 2 - 1, pick.s));
       if (way.len < len + 4 || !this.sampleVisible(way, s, pick.dir, len)) continue;
       const lane = 0, group = this.lanes.get(`${pick.w}:${pick.dir}:${lane}`) ?? [];
@@ -462,165 +475,136 @@ export class Traffic {
     }
   }
 
+  /**
+   * One vehicle as a small isometric illustration: contact shadow, dark outline round the whole
+   * silhouette, faces lit by the render's sun, glass with a highlight, wheels on the visible sides.
+   * Far away (px < 0.6) only the body block, so distant traffic stays clean.
+   */
   private box(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number], v: Vehicle) {
     const r: [number, number] = [d[1], -d[0]];
-    const hl = v.len / 2, hw = v.wid / 2;
-    const pt = (a: number, b: number, z: number): Vec3 =>
-      [c[0] + d[0] * a + r[0] * b, c[1] + d[1] * a + r[1] * b, c[2] + z];
-    const [R, G, B] = v.color;
-    const rgb = (k: number, a = 1) => {
-      ctx.globalAlpha = a;
-      ctx.fillStyle = `rgb(${Math.min(255, R * k) | 0},${Math.min(255, G * k) | 0},${Math.min(255, B * k) | 0})`;
+    const pt = (a: number, b: number, z: number): Vec3 => [c[0] + d[0] * a + r[0] * b, c[1] + d[1] * a + r[1] * b, c[2] + z];
+    const scr = (p: Vec3) => proj(p);
+    const px = Math.abs(scr(pt(1, 0, 0))[0] - scr(pt(0, 0, 0))[0]) + Math.abs(scr(pt(1, 0, 0))[1] - scr(pt(0, 0, 0))[1]); // screen px per metre
+    const kind = v.bus ? "bus" : v.kind;
+    const hl = v.len / 2, hw = v.wid / 2, G = 0.08;
+    const path = (pts: Vec3[]) => { ctx.beginPath(); pts.forEach((p, i) => { const [x, y] = scr(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); };
+    const fill = (pts: Vec3[], css: string, a = 1) => { ctx.globalAlpha = a; ctx.fillStyle = css; path(pts); ctx.fill(); ctx.globalAlpha = 1; };
+    const shade = (rgb: [number, number, number], n: Vec3) => {
+      const k = 0.62 + 0.42 * Math.max(0, n[0] * SUN[0] + n[1] * SUN[1] + n[2] * SUN[2]);
+      return `rgb(${Math.min(255, rgb[0] * k) | 0},${Math.min(255, rgb[1] * k) | 0},${Math.min(255, rgb[2] * k) | 0})`;
     };
-    const poly = (pts: Vec3[]) => {
-      ctx.beginPath();
-      pts.forEach((p, i) => { const [x, y] = proj(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.closePath();
-      ctx.fill();
+    const facing = (a: Vec3, b: Vec3) => { const nx = b[1] - a[1], ny = -(b[0] - a[0]); return nx * this.camFwd[0] + ny * this.camFwd[1] < 0; };
+    // footprint with chamfered corners (rounded look), CCW
+    const ch = Math.min(0.45, hw * 0.35);
+    const foot = (scale: number, zz: number, front = hl, rear = -hl): Vec3[] => [
+      pt(front, (hw - ch) * scale, zz), pt(front - ch, hw * scale, zz), pt(rear + ch, hw * scale, zz), pt(rear, (hw - ch) * scale, zz),
+      pt(rear, -(hw - ch) * scale, zz), pt(rear + ch, -hw * scale, zz), pt(front - ch, -hw * scale, zz), pt(front, -(hw - ch) * scale, zz),
+    ];
+    // contact shadow (soft, slightly toward the shadow side of the render's sun)
+    fill(foot(1.08, G).map((p) => [p[0] + 0.45, p[1] + 0.3, p[2]] as Vec3), "#000", 0.2);
+    // tyres first (the body covers their top half), and only on the side facing the camera
+    const visibleSide = facing(pt(-hl, hw, 0), pt(hl, hw, 0)) ? 1 : -1;
+    this.wheels(ctx, scr, pt, v, px, (kind === "bus" ? hl * 0.72 : hl * 0.62), hw * visibleSide);
+
+    const prism = (bottom: Vec3[], top: Vec3[], rgb: [number, number, number]) => {
+      for (let i = 0; i < bottom.length; i++) {
+        const a = bottom[i], b = bottom[(i + 1) % bottom.length];
+        if (!facing(a, b)) continue;
+        const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        fill([a, b, top[(i + 1) % top.length], top[i]], shade(rgb, [(b[1] - a[1]) / L, -(b[0] - a[0]) / L, 0]));
+      }
+      fill(top, shade(rgb, [0, 0, 1]));
     };
-    const ground = 0.12;
-    // soft oval contact shadow
-    {
-      const sh = [pt(hl * 0.85, 0, ground), pt(0, hw * 1.05, ground), pt(-hl * 0.85, 0, ground), pt(0, -hw * 1.05, ground)];
-      ctx.globalAlpha = 0.22;
-      ctx.fillStyle = "#000";
-      poly(sh.map((p) => [p[0] + 0.35, p[1] - 0.35, p[2]] as Vec3));
-      ctx.globalAlpha = 1;
-    }
-    if (v.bus) {
-      this.drawBus(ctx, proj, pt, poly, rgb, hl, hw, v);
+    const outline = (pts: Vec3[]) => {
+      // convex hull of the projected silhouette, stroked dark: crisp edge against the painted street
+      const P = pts.map(scr).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+      const lo: number[][] = [], hi: number[][] = [];
+      for (const p of P) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+      for (const p of [...P].reverse()) { while (hi.length >= 2 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+      const H = [...lo.slice(0, -1), ...hi.slice(0, -1)];
+      ctx.beginPath(); H.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+      ctx.lineJoin = "round"; ctx.lineWidth = Math.max(0.8, Math.min(1.6, px * 0.09)); ctx.strokeStyle = "rgba(28,24,22,0.7)"; ctx.stroke();
+    };
+    const glass = "rgb(38,52,66)";
+
+    if (kind === "bus") {
+      // ATAC bus: red body, continuous black window band, light roof with AC pod, big windscreen
+      const z0 = G + 0.32, zWin0 = G + 1.15, zWin1 = v.hei - 0.35, zTop = v.hei;
+      const bot = foot(1, z0), top = foot(1, zTop);
+      outline([...foot(1, G), ...top]);
+      prism(foot(1, G + 0.02), foot(1, zWin0), v.color);
+      prism(foot(1, zWin0), foot(1, zWin1), [30, 34, 40]);
+      prism(foot(1, zWin1), top, v.color);
+      fill(foot(0.94, zTop + 0.01), shade([226, 224, 218], [0, 0, 1]));
+      if (px > 4) {
+        prism(foot(0.55, zTop, hl * 0.25, -hl * 0.35), foot(0.55, zTop + 0.32, hl * 0.25, -hl * 0.35), [200, 200, 196]); // AC pod
+        // windscreen + destination band at the front, doors as dark slots on the camera side
+        fill([pt(hl, hw * 0.88, zWin0 - 0.25), pt(hl, -hw * 0.88, zWin0 - 0.25), pt(hl, -hw * 0.88, zTop - 0.12), pt(hl, hw * 0.88, zTop - 0.12)], glass, 0.9);
+        fill([pt(hl + 0.01, hw * 0.7, zTop - 0.32), pt(hl + 0.01, -hw * 0.7, zTop - 0.32), pt(hl + 0.01, -hw * 0.7, zTop - 0.12), pt(hl + 0.01, hw * 0.7, zTop - 0.12)], "rgb(255,176,48)", 0.95);
+        for (const side of [1, -1]) {
+          const a = pt(hl, side * hw, 0), b = pt(-hl, side * hw, 0);
+          if (side === 1 ? !facing(pt(-hl, hw, 0), pt(hl, hw, 0)) : !facing(pt(hl, -hw, 0), pt(-hl, -hw, 0))) continue;
+          void a; void b;
+          for (const at of v.len > 15 ? [hl * 0.78, hl * 0.25, -hl * 0.3, -hl * 0.78] : [hl * 0.78, -hl * 0.05, -hl * 0.72])
+            fill([pt(at + 0.6, side * (hw + 0.01), z0), pt(at - 0.6, side * (hw + 0.01), z0), pt(at - 0.6, side * (hw + 0.01), zWin1), pt(at + 0.6, side * (hw + 0.01), zWin1)], "rgb(24,26,30)", 0.85);
+        }
+        if (v.len > 15) fill([pt(0.4, hw + 0.02, G), pt(-0.4, hw + 0.02, G), pt(-0.4, hw + 0.02, zTop), pt(0.4, hw + 0.02, zTop)], "rgb(20,20,22)", 0.8); // articulation
+      }
+      void bot;
       return;
     }
-    // sedan proportions: low nose → cabin → short deck
-    const z0 = ground + 0.18;          // underbody
-    const zBelt = ground + v.hei * 0.52;
-    const zRoof = ground + v.hei;
-    const nose = hl * 0.92, cabinF = hl * 0.28, cabinR = -hl * 0.42, tail = -hl * 0.88;
-    const wBody = hw * 0.96, wCabin = hw * 0.78;
-    // lower body (hood + doors + rear deck)
-    const body = [
-      pt(nose, wBody * 0.72, zBelt * 0.85), pt(nose, -wBody * 0.72, zBelt * 0.85),
-      pt(cabinF, -wBody, zBelt), pt(cabinR, -wBody, zBelt),
-      pt(tail, -wBody * 0.85, zBelt * 0.9), pt(tail, wBody * 0.85, zBelt * 0.9),
-      pt(cabinR, wBody, zBelt), pt(cabinF, wBody, zBelt),
-    ];
-    // cabin greenhouse
-    const cabin = [
-      pt(cabinF * 0.85, wCabin, zBelt), pt(cabinF * 0.85, -wCabin, zBelt),
-      pt(cabinR * 0.9, -wCabin, zBelt), pt(cabinR * 0.9, wCabin, zBelt),
-    ];
-    const roof = [
-      pt(cabinF * 0.55, wCabin * 0.88, zRoof), pt(cabinF * 0.55, -wCabin * 0.88, zRoof),
-      pt(cabinR * 0.75, -wCabin * 0.88, zRoof), pt(cabinR * 0.75, wCabin * 0.88, zRoof),
-    ];
-    // camera-facing body flanks (bottom corners share the same floor z — mixed za/zb stretched faces)
-    const flank = (a: Vec3, b: Vec3, zBot: number, zTop: number, k: number) => {
-      const nx = (b[1] - a[1]), ny = -(b[0] - a[0]);
-      if (nx * this.camFwd[0] + ny * this.camFwd[1] >= 0) return;
-      rgb(k);
-      poly([
-        [a[0], a[1], c[2] + zTop] as Vec3, [b[0], b[1], c[2] + zTop] as Vec3,
-        [b[0], b[1], c[2] + zBot] as Vec3, [a[0], a[1], c[2] + zBot] as Vec3,
-      ]);
-    };
-    for (let i = 0; i < body.length; i++) {
-      const a = body[i], b = body[(i + 1) % body.length];
-      flank(a, b, z0, zBelt, 0.68 + 0.08 * (i % 2));
+
+    // cars, taxis, vans: lower body + glasshouse (vans: tall box with a short bonnet)
+    const van = kind === "van";
+    const zSill = G + 0.28, zBelt = G + v.hei * (van ? 0.45 : 0.55), zRoof = G + v.hei;
+    const nose = hl, tail = -hl;
+    const cabF = van ? hl * 0.55 : hl * 0.32, cabR = van ? tail + 0.15 : -hl * 0.55;
+    const lower = foot(1, zSill), belt = foot(1, zBelt);
+    const roofP = foot(0.84, zRoof, cabF - (van ? 0.15 : 0.45), cabR + (van ? 0.05 : 0.35));
+    const glassBot = foot(0.92, zBelt, cabF, cabR);
+    outline([...foot(1, G), ...belt, ...roofP]);
+    if (px < 3) { // far: one lit block, cabin as a darker top
+      prism(foot(1, G + 0.05), belt, v.color);
+      prism(glassBot, roofP, [52, 62, 72]);
+      fill(roofP, shade(v.color, [0, 0, 1]));
+      return;
     }
-    rgb(0.88); poly(body.map((p) => [p[0], p[1], c[2] + zBelt] as Vec3)); // belt / hood plane
-    // cabin sides + roof
-    for (let i = 0; i < 4; i++) {
-      const a = cabin[i], b = cabin[(i + 1) % 4];
-      flank(a, b, zBelt, zRoof, 0.78);
+    prism(foot(1, G + 0.05), lower, [34, 34, 36]);           // sills / bumpers
+    prism(lower, belt, v.color);                              // body
+    // glasshouse: tinted glass sides, then roof in body colour
+    for (let i = 0; i < glassBot.length; i++) {
+      const a = glassBot[i], b = glassBot[(i + 1) % glassBot.length];
+      if (!facing(a, b)) continue;
+      fill([a, b, roofP[(i + 1) % roofP.length], roofP[i]], glass, 0.95);
     }
-    rgb(1.02); poly(roof);
-    // windshield (front) + rear glass
-    const glass = (pts: Vec3[], a: number) => {
-      ctx.globalAlpha = a;
-      ctx.fillStyle = "#1a2430";
-      poly(pts);
-      ctx.globalAlpha = 1;
-    };
-    glass([
-      pt(cabinF * 0.82, wCabin * 0.9, zBelt + 0.05), pt(cabinF * 0.82, -wCabin * 0.9, zBelt + 0.05),
-      pt(cabinF * 0.52, -wCabin * 0.82, zRoof - 0.02), pt(cabinF * 0.52, wCabin * 0.82, zRoof - 0.02),
-    ], 0.62);
-    glass([
-      pt(cabinR * 0.88, wCabin * 0.88, zBelt + 0.05), pt(cabinR * 0.88, -wCabin * 0.88, zBelt + 0.05),
-      pt(cabinR * 0.72, -wCabin * 0.8, zRoof - 0.02), pt(cabinR * 0.72, wCabin * 0.8, zRoof - 0.02),
-    ], 0.45);
-    // side windows
-    glass([
-      pt(cabinF * 0.5, wCabin, zBelt + 0.08), pt(cabinR * 0.7, wCabin, zBelt + 0.08),
-      pt(cabinR * 0.7, wCabin * 0.88, zRoof - 0.04), pt(cabinF * 0.5, wCabin * 0.88, zRoof - 0.04),
-    ], 0.35);
-    glass([
-      pt(cabinF * 0.5, -wCabin, zBelt + 0.08), pt(cabinR * 0.7, -wCabin, zBelt + 0.08),
-      pt(cabinR * 0.7, -wCabin * 0.88, zRoof - 0.04), pt(cabinF * 0.5, -wCabin * 0.88, zRoof - 0.04),
-    ], 0.35);
-    // headlights + taillights
-    const lamp = (a: number, b: number, z: number, color: string, alpha: number) => {
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = color;
-      poly([pt(a, b * 0.55, z), pt(a, b * 0.15, z), pt(a - Math.sign(a) * 0.12, b * 0.15, z + 0.08), pt(a - Math.sign(a) * 0.12, b * 0.55, z + 0.08)]);
-      ctx.globalAlpha = 1;
-    };
-    lamp(nose, hw, zBelt * 0.7, "#f4f0d8", 0.85);
-    lamp(nose, -hw, zBelt * 0.7, "#f4f0d8", 0.85);
-    lamp(tail, hw, zBelt * 0.75, "#c62828", 0.8);
-    lamp(tail, -hw, zBelt * 0.75, "#c62828", 0.8);
-    // wheels (dark ellipses under the body)
-    for (const [along, side] of [[hl * 0.55, hw], [hl * 0.55, -hw], [-hl * 0.55, hw], [-hl * 0.55, -hw]] as const) {
-      const w0 = pt(along, side * 0.92, ground + 0.05);
-      const [sx, sy] = proj(w0);
-      const [sx2] = proj(pt(along + 0.35, side * 0.92, ground + 0.05));
-      const rad = Math.max(1.2, Math.abs(sx2 - sx) * 0.9);
-      ctx.globalAlpha = 0.9;
-      ctx.fillStyle = "#1a1c20";
-      ctx.beginPath();
-      ctx.ellipse(sx, sy, rad, rad * 0.55, Math.atan2(d[1], d[0]), 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
+    fill(roofP, shade(v.color, [0, 0, 1]));
+    // highlight streak on the windscreen + bonnet line
+    ctx.globalAlpha = 0.35; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = Math.max(0.6, px * 0.05);
+    ctx.beginPath(); { const [x1, y1] = scr(pt(cabF, hw * 0.5, zBelt + 0.15)), [x2, y2] = scr(pt(cabF - 0.3, -hw * 0.2, zRoof - 0.1)); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); } ctx.stroke();
+    ctx.globalAlpha = 1;
+    // lamps
+    fill([pt(nose + 0.01, hw * 0.75, zBelt - 0.25), pt(nose + 0.01, hw * 0.35, zBelt - 0.25), pt(nose + 0.01, hw * 0.35, zBelt - 0.08), pt(nose + 0.01, hw * 0.75, zBelt - 0.08)], "rgb(250,246,226)", 0.95);
+    fill([pt(nose + 0.01, -hw * 0.75, zBelt - 0.25), pt(nose + 0.01, -hw * 0.35, zBelt - 0.25), pt(nose + 0.01, -hw * 0.35, zBelt - 0.08), pt(nose + 0.01, -hw * 0.75, zBelt - 0.08)], "rgb(250,246,226)", 0.95);
+    fill([pt(tail - 0.01, hw * 0.8, zBelt - 0.22), pt(tail - 0.01, hw * 0.45, zBelt - 0.22), pt(tail - 0.01, hw * 0.45, zBelt - 0.06), pt(tail - 0.01, hw * 0.8, zBelt - 0.06)], "rgb(200,30,30)", 0.9);
+    fill([pt(tail - 0.01, -hw * 0.8, zBelt - 0.22), pt(tail - 0.01, -hw * 0.45, zBelt - 0.22), pt(tail - 0.01, -hw * 0.45, zBelt - 0.06), pt(tail - 0.01, -hw * 0.8, zBelt - 0.06)], "rgb(200,30,30)", 0.9);
+    if (kind === "taxi") { // Rome taxi: white with the roof sign
+      prism(foot(0.25, zRoof, 0.35, -0.35), foot(0.25, zRoof + 0.22, 0.35, -0.35), [250, 246, 230]);
     }
   }
 
-  private drawBus(
-    ctx: CanvasRenderingContext2D,
-    proj: (p: Vec3) => [number, number],
-    pt: (a: number, b: number, z: number) => Vec3,
-    poly: (pts: Vec3[]) => void,
-    rgb: (k: number, a?: number) => void,
-    hl: number, hw: number, v: Vehicle,
-  ) {
-    const ground = 0.12, z0 = ground + 0.2, zBelt = ground + v.hei * 0.45, zRoof = ground + v.hei;
-    const nose = hl * 0.95, tail = -hl * 0.95;
-    const body = [pt(nose, hw, zBelt), pt(nose, -hw, zBelt), pt(tail, -hw, zBelt), pt(tail, hw, zBelt)];
-    const roof = [pt(nose, hw, zRoof), pt(nose, -hw, zRoof), pt(tail, -hw, zRoof), pt(tail, hw, zRoof)];
-    for (let i = 0; i < 4; i++) {
-      const a = body[i], b = body[(i + 1) % 4];
-      const nx = (b[1] - a[1]), ny = -(b[0] - a[0]);
-      if (nx * this.camFwd[0] + ny * this.camFwd[1] >= 0) continue;
-      rgb(0.7 + 0.08 * (i % 2));
-      poly([a, b, roof[(i + 1) % 4], roof[i]]);
+  /** dark tyres peeking out under the body on the camera side */
+  private wheels(ctx: CanvasRenderingContext2D, scr: (p: Vec3) => [number, number], pt: (a: number, b: number, z: number) => Vec3, v: Vehicle, px: number, along: number, hw: number) {
+    if (px < 3) return;
+    const radius = v.bus ? 0.5 : 0.32;
+    for (const a of v.len > 15 ? [along, 0, -along] : [along, -along]) {
+      const side = hw; // signed: the camera-facing side
+      const c = pt(a, side * 1.01, radius), [x, y] = scr(c), [x2, y2] = scr(pt(a + radius, side * 1.01, radius));
+      const rad = Math.max(1, Math.hypot(x2 - x, y2 - y));
+      ctx.globalAlpha = 0.95; ctx.fillStyle = "#18191c";
+      ctx.beginPath(); ctx.ellipse(x, y, rad, rad * 0.75, Math.atan2(y2 - y, x2 - x), 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
     }
-    rgb(0.95); poly(roof);
-    // window band
-    ctx.globalAlpha = 0.4;
-    ctx.fillStyle = "#1a2430";
-    poly([
-      pt(nose - 0.4, hw - 0.12, zBelt + 0.15), pt(nose - 0.4, -hw + 0.12, zBelt + 0.15),
-      pt(tail + 0.5, -hw + 0.12, zRoof - 0.2), pt(tail + 0.5, hw - 0.12, zRoof - 0.2),
-    ]);
-    ctx.globalAlpha = 1;
-    // front glass
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = "#243040";
-    poly([
-      pt(nose, hw * 0.85, zBelt + 0.1), pt(nose, -hw * 0.85, zBelt + 0.1),
-      pt(nose - 0.15, -hw * 0.75, zRoof - 0.15), pt(nose - 0.15, hw * 0.75, zRoof - 0.15),
-    ]);
-    ctx.globalAlpha = 1;
-    void proj; void z0;
   }
 }
 

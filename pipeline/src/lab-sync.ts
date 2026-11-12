@@ -28,7 +28,17 @@ interface State { files: Record<string, { size: number; mtime: number; batch: st
 const state: State = existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : { files: {}, batches: [] };
 
 const env = { ...process.env, PATH: `/usr/local/bin:${process.env.PATH}` }; // wrangler wants Node ≥ 22.23.4
-const wrangler = (...args: string[]) => execFileSync("npx", ["wrangler", ...args, "--remote"], { env, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 30 });
+/** wrangler with retries: two wrangler processes refreshing the OAuth token at once can make one
+ *  fail with 401 for a moment; a network hiccup should not lose a pass either */
+function wrangler(...args: string[]): Buffer {
+  for (let attempt = 1; ; attempt++) {
+    try { return execFileSync("npx", ["wrangler", ...args, "--remote"], { env, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 30 }); }
+    catch (e) {
+      if (attempt >= 4) throw e;
+      execFileSync("sleep", [String(20 * attempt)]);
+    }
+  }
+}
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex");
 
 function changedFiles() {
@@ -63,9 +73,11 @@ function pass() {
     writeFileSync(list, g.map((f) => f.rel).join("\n"));
     execFileSync("tar", ["-cf", tar, "-C", DATA, "-T", list]);
     const local = sha(readFileSync(tar));
-    wrangler("r2", "object", "put", `${BUCKET}/lab/${name}`, "--file", tar);
-    const remote = sha(wrangler("r2", "object", "get", `${BUCKET}/lab/${name}`, "--pipe"));
-    rmSync(tar);
+    let remote = "";
+    try {
+      wrangler("r2", "object", "put", `${BUCKET}/lab/${name}`, "--file", tar);
+      remote = sha(wrangler("r2", "object", "get", `${BUCKET}/lab/${name}`, "--pipe"));
+    } finally { rmSync(tar, { force: true }); }
     if (remote !== local) throw new Error(`lab-sync: ${name} differs after upload (${local} vs ${remote}); nothing recorded`);
     for (const f of g) state.files[f.rel] = { size: f.size, mtime: f.mtime, batch: name };
     state.batches.push(name);

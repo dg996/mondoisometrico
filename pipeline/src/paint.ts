@@ -72,7 +72,7 @@ Geometry comes ONLY from images 1 and 2 — this is a tracing job:
 - Same orthographic camera, framing and scale: the output overlays image 1 pixel-for-pixel.
 - Every building keeps its exact footprint, position, height and roof outline. Draw believable Rome \
 materials: ochre/cream/terracotta plaster blocks, brick and travertine public buildings, \
-real window grids, shutters, cornices, rooftop terraces and AC units. \
+real window grids, shutters, cornices; rooftop terraces only where image 1 shows a flat roof. \
 CRITICAL building craft: each block is a solid orthographic prism — vertical walls meet roofs at crisp \
 right angles; no melted/warped facades, no roofs sliding off walls, no two buildings fused into one mass, \
 no floating grass patches. Neighbouring blocks stay separated by streets/courtyards exactly as in image 1. \
@@ -87,6 +87,7 @@ Bridges stay LEVEL and straight across the Tiber: stone/travertine flat deck wit
 piers in the water if present in image 1 — never a road dipping into the river, never blue asphalt \
 over water, never a melted ribbon. Cars only on the deck, never floating above water or rooftops. \
 Do not add, remove, merge or move buildings or trees; do not invent trees over open streets. \
+COLOUR FIDELITY: image 1 already gives every building its real plaster colour (ochre, Roman yellow, Pompeian red, pink, ivory) and its roof (terracotta coppi, flat terrace, grey lead dome). Keep each building's facade colour and roof material exactly as in image 1 and UNIFORM over the whole building: never paint half a facade or half a roof in another colour, never turn a pitched coppi roof into a flat grey terrace or the reverse, never invent rooftop AC units or solar panels on tiled roofs. A colour change is allowed only where image 1 shows two different buildings. \
 Keep travertine warm ivory, Vittoriano white marble, sampietrini charcoal grey, river muted blue-green; avoid cyan pools and neon grass. Match saturation/hue of already-painted neighbour strips — no washed-out grey band across the tile.
 - Streets, squares, parks and the Tiber stay exactly where they are; give them real texture \
 (sampietrini / pale stone paving — not orange —, crosswalks at junctions, grass, water ripples, \
