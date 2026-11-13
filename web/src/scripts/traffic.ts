@@ -83,12 +83,18 @@ const GUIDE_CELL = 25, OFF_ROUTE = 16, BUS_SPEED = 6; // m, m, m/s average incl.
 const LANE_W = 3.4;
 const INFER_LANES = true;
 /** fade-in after (re)appearing (s) and fade-out over the last metres before leaving the drawn graph */
-const FADE_IN = 0.7, FADE_OUT_M = 5;
+const FADE_IN = 0.9, FADE_OUT_M = 5;
 /** a body fades out over the last metres before a stretch hidden in the view (behind a building,
  *  under a tree crown) and back in over the first metres after it */
 const COVER_FADE_M = 4;
 /** a line bus put back on its route needs this much route ahead inside the drawn graph (m) */
 const RUNWAY = 120;
+/** movers in the whole graph; around the view the density is topped up to NEAR_DENSITY_M */
+const MAX_VEHICLES = 4000;
+/** target around the view: one vehicle per this many class-weighted metres of street */
+const NEAR_DENSITY_M = 16;
+/** cars moved per second from far away to the streets just outside the view */
+const RECYCLE_PER_S = 60;
 
 export class Traffic {
   private ways: Way[] = [];
@@ -151,7 +157,9 @@ export class Traffic {
     const weights = this.ways.map((w) => w.len * CLASS_WEIGHT[w.r.c]);
     const total = weights.reduce((a, b) => a + b, 0);
     if (!Number.isFinite(total) || total <= 0) return;
-    const count = Math.round(Math.min(5000, Math.max(80, (total / 55) * density)));
+    // the visitor's surroundings are kept busy by moving far-away cars there (recycle), so the
+    // whole graph needs fewer movers: lighter on phones, denser where someone looks
+    const count = Math.round(Math.min(MAX_VEHICLES, Math.max(80, (total / 55) * density)));
     this.regroup();
     // centres of the vehicles placed so far (20 m cells): no spawn on top of one on another way
     const placed = new Map<string, Array<[number, number, number]>>();
@@ -373,6 +381,14 @@ export class Traffic {
 
   private endNode(v: Vehicle) { const r = this.ways[v.w].r; return v.dir === 1 ? r.b : r.a; }
 
+  /** share of a way's samples in view, cached per way */
+  private open = new Map<number, number>();
+  private openShare(w: number) {
+    let v = this.open.get(w);
+    if (v === undefined) { v = this.wayVisible(this.ways[w]); this.open.set(w, v); }
+    return v;
+  }
+
   /** Fraction of samples still marked visible (0 = fully occluded / in the river). */
   private wayVisible(way: Way) {
     const S = way.r.s;
@@ -406,7 +422,9 @@ export class Traffic {
     const pool = (v.bus ? drivable.filter((o) => this.ways[o.w].r.c <= 3) : drivable);
     const from = pool.length ? pool : drivable;
     if (!from.length) return null;
-    const weights = from.map((o) => CLASS_WEIGHT[this.ways[o.w].r.c] + 0.05);
+    // prefer the streets in view: a way mostly hidden (lanes under a garden's crowns, behind a block)
+    // is still taken when it is the only way on, but rarely when an open street is the alternative
+    const weights = from.map((o) => (CLASS_WEIGHT[this.ways[o.w].r.c] + 0.05) * (0.08 + 0.92 * this.openShare(o.w) ** 2));
     let pick = this.rand() * weights.reduce((a, b) => a + b, 0), k = 0;
     while (pick > weights[k] && k < weights.length - 1) pick -= weights[k++];
     return from[k];
@@ -442,6 +460,57 @@ export class Traffic {
     return left;
   }
 
+  /** ways around the view (in it or within ~60 % of a screen of it), and those of them just outside
+   *  it (where recycled cars are put: they drive into the view from its edges), refreshed each second */
+  private near: Uint8Array | null = null;
+  private ring: number[] = [];
+  private nearWeight = 0;
+  private nearT = -1e9;
+  private findNear(proj: (p: Vec3) => [number, number], [vx0, vy0, vx1, vy1]: [number, number, number, number]) {
+    this.nearT = this.t;
+    const mx = (vx1 - vx0) * 0.6, my = (vy1 - vy0) * 0.6;
+    const near = this.near && this.near.length === this.ways.length ? this.near.fill(0) : new Uint8Array(this.ways.length);
+    const ring: number[] = [];
+    let weight = 0;
+    this.ways.forEach((way, w) => {
+      const S = way.r.s, k = Math.floor(way.n / 2) * 4, [x, y] = proj([S[k], S[k + 1], S[k + 2]]);
+      if (x < vx0 - mx || y < vy0 - my || x > vx1 + mx || y > vy1 + my) return;
+      near[w] = 1; weight += way.len * CLASS_WEIGHT[way.r.c];
+      const out = x < vx0 - 120 || y < vy0 - 120 || x > vx1 + 120 || y > vy1 + 120;
+      if (out && way.r.c <= 4 && way.len > 25) ring.push(w);
+    });
+    this.near = near; this.ring = ring; this.nearWeight = weight;
+  }
+
+  /** Keep the visitor's surroundings busy: move cars that are far from the view (unseen there) onto
+   *  the streets just outside it, where they drive in like any other car. Line buses keep their lines. */
+  private recycle(dt: number) {
+    const near = this.near;
+    if (!near || !this.ring.length) return;
+    let around = 0;
+    for (const v of this.vehicles) if (!v.off && near[v.w]) around++;
+    const want = this.nearWeight / NEAR_DENSITY_M;
+    let budget = Math.min(want - around, RECYCLE_PER_S * dt + this.rand());
+    for (let tries = 0; budget >= 1 && tries < 40; tries++) {
+      const v = this.vehicles[Math.floor(this.rand() * this.vehicles.length)];
+      if (v.bus || v.line >= 0 || near[v.w] || v.holding >= 0 || v.through) continue;
+      const w = this.ring[Math.floor(this.rand() * this.ring.length)], way = this.ways[w];
+      const dir: 1 | -1 = way.r.o === 1 ? 1 : way.r.o === -1 ? -1 : this.rand() < 0.5 ? 1 : -1;
+      const lo = v.len / 2 + Math.max(this.nodeR.get(dir === 1 ? way.r.a : way.r.b) ?? 0, 4);
+      const hi = way.len - v.len / 2 - Math.max(this.nodeR.get(dir === 1 ? way.r.b : way.r.a) ?? 0, 4);
+      if (hi <= lo) continue;
+      const s = lo + this.rand() * (hi - lo), lane = Math.floor(this.rand() * Math.max(1, way.r.l));
+      if (this.onZebra(w, dir, s, v.len)) continue;
+      const g = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
+      if (g.some((o) => Math.abs(o.s - s) < (o.len + v.len) / 2 + 2 * GAP)) continue;
+      if (!this.spotFree(w, dir, s, v.len, v)) continue;
+      this.release(v);
+      Object.assign(v, { w, dir, lane, s, v: this.limit(v) * 0.7, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined, gone: undefined, ca: undefined });
+      this.insertLane(v);
+      budget--;
+    }
+  }
+
   /** Is this point of a way inside the view drawn last (with a margin)? Placements avoid it: nothing
    *  appears out of thin air in front of the visitor. */
   private onScreen: ((p: Vec3) => boolean) | null = null;
@@ -453,11 +522,11 @@ export class Traffic {
 
   /** distance (m) from the start of a way, in travel direction, to its first hidden sample within
    *  COVER_FADE_M; null when the start is clear that far */
-  private coverFromStart(way: Way, dir: 1 | -1): number | null {
+  private coverFromStart(way: Way, dir: 1 | -1, reach = COVER_FADE_M): number | null {
     const S = way.r.s;
     for (let k = 0; k < way.n; k++) {
       const i = dir === 1 ? k : way.n - 1 - k, d = dir === 1 ? way.cum[i] : way.len - way.cum[i];
-      if (d > COVER_FADE_M) return null;
+      if (d > reach) return null;
       if (S[i * 4 + 3] !== 1) return d;
     }
     return null;
@@ -783,6 +852,7 @@ export class Traffic {
         }
       }
     }
+    this.recycle(dt);
     // move vehicles that have driven past the end of their way onto the next one
     for (const v of this.vehicles) {
       if (v.off) { if (this.rand() < dt) { if (v.line >= 0) this.reenterLine(v); else this.respawn(v); } continue; } // about once a second
@@ -861,12 +931,13 @@ export class Traffic {
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
     this.drawn = 0;
     this.lit = [];
-    if (px < 0.28) { this.onScreen = null; return; } // only when asphalt is clearly readable — no fleas on roofs at mid zoom
+    if (px < 0.28) { this.onScreen = null; this.near = null; return; } // only when asphalt is clearly readable — no fleas on roofs at mid zoom
     const [vx0, vy0, vx1, vy1] = view;
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] =>
       toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
     this.onScreen = (p) => { const [x, y] = proj(p); return x > vx0 - 80 && y > vy0 - 80 && x < vx1 + 80 && y < vy1 + 80; };
+    if (this.t - this.nearT > 1) this.findNear(proj, view);
     const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; a: number; depth: number }> = [];
     for (const v of this.vehicles) {
       const way = this.ways[v.w], S = way.r.s;
@@ -881,12 +952,14 @@ export class Traffic {
       // cover ahead (also where the next way starts under it): fades out geometrically, never drawn
       // over the cover; coming out of it (or onto a way from one) fades in over ≈0.25 s
       let target = this.clearance(way, v.s, v.dir, v.len);
+      // at the way change the body is put whole onto the next way (rear at its start, front one body
+      // length in): cover within that length must already be faded in to before the change
       const ahead = way.len - (v.s + v.len / 2);
-      if (v.next && target > 0 && ahead < COVER_FADE_M) {
-        const d0 = this.coverFromStart(this.ways[v.next.w], v.next.dir);
-        if (d0 !== null) target = Math.min(target, Math.max(0, ahead + d0) / COVER_FADE_M);
+      if (v.next && target > 0 && ahead < COVER_FADE_M + v.len) {
+        const d0 = this.coverFromStart(this.ways[v.next.w], v.next.dir, v.len + COVER_FADE_M);
+        if (d0 !== null) target = Math.min(target, Math.max(0, ahead + d0 - v.len) / COVER_FADE_M);
       }
-      const kc = 1 - Math.exp(-Math.max(0, this.t - (v.caT ?? -1e9)) / 0.1);
+      const kc = 1 - Math.exp(-Math.max(0, this.t - (v.caT ?? -1e9)) / 0.2);
       v.caT = this.t;
       v.ca = v.ca === undefined || target <= v.ca ? target : v.ca + (target - v.ca) * kc;
       const clear = v.ca;
@@ -911,7 +984,12 @@ export class Traffic {
       if (Number.isFinite(grade) && c[2] < grade - 2.2) continue;
       // fade in after appearing, fade out over the last metres before a dead end / painted-area cut
       const born = v.born === undefined ? 1 : (this.t - v.born) / FADE_IN;
-      const leaving = v.next ? 1 : (way.len - (v.s + v.len / 2)) / FADE_OUT_M;
+      let leaving = v.next ? 1 : (way.len - (v.s + v.len / 2)) / FADE_OUT_M;
+      if (v.next) { // the next way is a short dead end (after the hop the body would already be at its end)
+        const nw = this.ways[v.next.w], nEnd = v.next.dir === 1 ? nw.r.b : nw.r.a;
+        if (nw.len < v.len + FADE_OUT_M * 2 && !(this.out.get(nEnd) ?? []).some((o) => o.w !== v.next!.w))
+          leaving = Math.max(0, way.len - (v.s + v.len / 2) + nw.len - v.len) / FADE_OUT_M;
+      }
       const going = v.gone === undefined ? 1 : 1 - (this.t - v.gone) / 0.8;
       const alpha = Math.max(0, Math.min(1, born, leaving, clear, going));
       if (alpha < 0.02) continue;
