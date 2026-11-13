@@ -94,8 +94,9 @@ export function grade(elev: number, cloud: number) {
   const lerp = (a: number, b: number, t: number) => a + (b - a) * Math.min(1, Math.max(0, t));
   // night (< -8°) deep blue multiply; blue hour (-8..0) lighter; golden hour (0..12) warm; day neutral
   let mult: [number, number, number] = [255, 255, 255], wash: [number, number, number, number] = [0, 0, 0, 0];
-  if (elev < -8) mult = [104, 116, 162];
-  else if (elev < 0) { const t = (elev + 8) / 8; mult = [lerp(104, 210, t), lerp(116, 200, t), lerp(162, 218, t)]; wash = [90, 110, 190, lerp(0.10, 0.06, t)]; }
+  // night stays readable (streets, cars and monuments under the street lamps of lights.ts)
+  if (elev < -8) mult = [84, 98, 150];
+  else if (elev < 0) { const t = (elev + 8) / 8; mult = [lerp(84, 210, t), lerp(98, 200, t), lerp(150, 218, t)]; wash = [90, 110, 190, lerp(0.10, 0.06, t)]; }
   else if (elev < 12) { const t = elev / 12; mult = [255, lerp(214, 252, t), lerp(170, 245, t)]; wash = [255, 170, 90, lerp(0.16, 0, t)]; }
   // overcast: flatter, greyer light (never as dark as night)
   const c = Math.min(1, Math.max(0, (cloud - 40) / 60)) * (elev > -4 ? 1 : 0.3);
@@ -103,7 +104,21 @@ export function grade(elev: number, cloud: number) {
   return { mult, wash, desat: c * 0.35 };
 }
 
+/** How lit the city is (0 day … 1 night): street lamps come on at sunset, full from civil dusk. */
+export function nightness(elev: number) { return Math.min(1, Math.max(0, (1 - elev) / 7)); }
+
+/** Light the visitor can pick: Rome's real time, or a fixed day / afternoon / night. */
+export type DayMode = "live" | "giorno" | "pomeriggio" | "notte";
+/** sun elevation (°) and transit clock (min) of each fixed mode: night buses by night */
+const MODES: Record<Exclude<DayMode, "live">, { elev: number; clock: number }> = {
+  giorno: { elev: 48, clock: 11 * 60 },
+  pomeriggio: { elev: 7, clock: 17 * 60 + 30 },
+  notte: { elev: -20, clock: 23 * 60 + 30 },
+};
+
 export interface Ambient {
+  /** 0 by day … 1 by night: street lamps, headlights and floodlights (lights.ts) */
+  night(): number;
   /** draw rain / fog on the overlay canvas for this frame */
   draw(ctx: CanvasRenderingContext2D, w: number, h: number, dt: number): void;
   /** Rome's clock (minutes since midnight): transit runs by it */
@@ -121,6 +136,8 @@ export function startAmbient(): Ambient {
   const clock = document.getElementById("ambient-clock")!;
   const meteo = document.getElementById("ambient-weather")!;
   const map = document.getElementById("map")!;
+  const picker = document.getElementById("daytime");
+  let mode: DayMode = "live";
 
   const fixed = testParam("ora")?.match(/^(\d{1,2}):(\d{2})$/);
   const minutes: number | null = fixed ? Number(fixed[1]) * 60 + Number(fixed[2]) : null; // null = live
@@ -134,11 +151,12 @@ export function startAmbient(): Ambient {
   const dateAt = (m: number) => new Date(Date.now() + (m - romeNow()) * 60_000);
   const show = (m: number) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(Math.floor(m % 60)).padStart(2, "0")}`;
 
+  const elevation = () => mode === "live" ? sunElevation(dateAt(minutes ?? romeNow())) : MODES[mode].elev;
   const apply = () => {
     const m = minutes ?? romeNow();
     clock.textContent = show(m);
     if (film()) { tint.style.opacity = "0"; wash.style.opacity = "0"; map.style.filter = ""; return; }
-    const g = grade(sunElevation(dateAt(m)), weather?.cloud ?? 0);
+    const g = grade(elevation(), weather?.cloud ?? 0);
     tint.style.backgroundColor = `rgb(${g.mult.map(Math.round).join(",")})`;
     tint.style.opacity = "1";
     wash.style.backgroundColor = `rgba(${g.wash.slice(0, 3).map(Math.round).join(",")},${g.wash[3].toFixed(3)})`;
@@ -146,6 +164,13 @@ export function startAmbient(): Ambient {
     map.style.filter = g.desat > 0.01 ? `saturate(${(1 - g.desat).toFixed(2)})` : "";
   };
   setInterval(apply, 20_000);
+  picker?.addEventListener("click", (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-mode]");
+    if (!b) return;
+    mode = b.dataset.mode as DayMode;
+    for (const x of picker.querySelectorAll("button")) x.setAttribute("aria-checked", String(x === b));
+    apply();
+  });
 
   const refresh = async () => {
     weather = await fetchWeather();
@@ -160,7 +185,8 @@ export function startAmbient(): Ambient {
   const drops: Array<[number, number, number]> = [];
   let fog = 0;
   return {
-    minutes: () => minutes ?? romeNow(),
+    minutes: () => mode === "live" ? minutes ?? romeNow() : MODES[mode].clock,
+    night: () => film() ? 0 : nightness(elevation()),
     draw(ctx, w, h, dt) {
       if (film() || !weather) return;
       // rain only when it rains in Rome, as much as it rains: clearly visible, thin enough that streets,

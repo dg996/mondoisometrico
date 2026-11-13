@@ -133,19 +133,23 @@ let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
 let traffic: Traffic | null = null, cats: Cats | null = null, trams: import("./trams.ts").Trams | null = null;
 let workers: import("./workers.ts").Workers | null = null;
+let lights: import("./lights.ts").Lights | null = null;
+const lightsCanvas = document.getElementById("lights") as HTMLCanvasElement | null;
+const lctx = lightsCanvas?.getContext("2d") ?? null;
 // the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
 let animationsRequested = false;
 function loadAnimations() {
   if (animationsRequested || !activity.rects.length) return;
   animationsRequested = true;
   Promise.all([
-    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"), import("./trams.ts"), import("./workers.ts"),
+    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"), import("./trams.ts"), import("./workers.ts"), import("./lights.ts"),
     fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
     // real bus and tram lines (Roma Servizi per la Mobilità GTFS, CC BY-SA), when exported
     files.transit ? fetch(`${BASE}/data/${files.transit}`).then((r) => (r.ok ? r.json() : null)) : Promise.resolve(null),
-  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, { Workers }, data, transit]) => {
+  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, { Workers }, { Lights }, data, transit]) => {
     if (world.worksites?.length) workers = new Workers(world.worksites, world.enu2px);
-    const roads = activeRoads(decodeRoads(data), world.enu2px, activity);
+    const allRoads = decodeRoads(data);
+    const roads = activeRoads(allRoads, world.enu2px, activity);
     if (roads.length) {
       traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)], 1.3, transit?.buses ?? []);
       traffic.clock = () => ambient.minutes();
@@ -157,9 +161,11 @@ function loadAnimations() {
       trams.clock = () => ambient.minutes();
     }
     if (roads.length) cats = new Cats(roads, world.enu2px);
+    // lamps on every street of the painted area, also the lanes hidden behind roofs (their glow shows)
+    if (roads.length) lights = new Lights(allRoads, world.enu2px, (x, y) => !world.activity || activity.containsRect(x, y));
     // Unbounded scenic flight routes escape the ready area. Keep them inactive until routes
     // can be certified against the same coverage mask as the road graph.
-    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __workers: workers, __parrots: null, __planes: null });
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __workers: workers, __lights: lights, __ambient: ambient, __parrots: null, __planes: null });
   });
 }
 setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
@@ -279,6 +285,22 @@ function frame(t: number) {
   }
   ctx.restore();
   ambient.draw(ctx, w, hgt, dt); // rain / fog of the live weather (screen space, over the map)
+  if (lights && lctx && lightsCanvas) { // the city lit at night, over the night tint
+    if (lightsCanvas.width !== w || lightsCanvas.height !== hgt) { lightsCanvas.width = w; lightsCanvas.height = hgt; }
+    const night = ambient.night();
+    const flood: Array<[number, number, number]> = [];
+    if (night > 0.02) for (const lm of LANDMARKS[document.body.dataset.city!] ?? []) {
+      const [gx, gy] = world.landmarks?.[lm.name] ?? landmarkPixel(lm);
+      if (world.activity && !activity.containsRect(gx, gy)) continue;
+      flood.push([gx, gy, Math.min(lm.paintRadiusM ?? 25, 80) * 0.7]);
+    }
+    lctx.save();
+    lctx.beginPath();
+    for (const [x0, y0, x1, y1] of activity.rects) lctx.rect(x0 * k + tx, y0 * k + ty, (x1 - x0) * k, (y1 - y0) * k);
+    lctx.clip();
+    lights.draw(lctx, toScreen, px, w, hgt, night, flood, traffic && showTraffic ? traffic.lit : []);
+    lctx.restore();
+  }
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview
   if (px >= 0.06) drawLandmarks(dpr, px); // monumenti principali when zoomed in enough
   lastT = t;

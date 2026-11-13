@@ -105,6 +105,8 @@ export class Traffic {
   private rand = mulberry(7);
   /** vehicles drawn in the last frame (debug / tests) */
   drawn = 0;
+  /** headlights / tail lights of the vehicles drawn in the last frame, canvas px (lights.ts) */
+  lit: import("./lights.ts").CarLight[] = [];
   private guides: Guide[] = [];
   /** 25 m grid of way samples [way, sample] (built on demand for placing line buses) */
   private sampleGrid: Map<string, number[]> | null = null;
@@ -784,6 +786,7 @@ export class Traffic {
   /** Draw vehicles. `toScreen` maps global art px -> canvas px; `px` = canvas px per art px. */
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
     this.drawn = 0;
+    this.lit = [];
     if (px < 0.28) return; // only when asphalt is clearly readable — no fleas on roofs at mid zoom
     const [vx0, vy0, vx1, vy1] = view;
     const M = this.enu2px;
@@ -837,6 +840,13 @@ export class Traffic {
     }
     items.sort((a, b) => b.depth - a.depth); // back to front
     this.drawn = items.length;
+    for (const { v, c, d, a } of items) {
+      const hl = v.len / 2, z = v.bus ? 1 : 0.7;
+      const [fx, fy] = proj([c[0] + d[0] * hl, c[1] + d[1] * hl, c[2] + z]), [rx, ry] = proj([c[0] - d[0] * hl, c[1] - d[1] * hl, c[2] + z]);
+      const [ax, ay] = proj([c[0] + d[0] * (hl + 1), c[1] + d[1] * (hl + 1), c[2] + z]);
+      const mpp = Math.hypot(ax - fx, ay - fy) || 1;
+      this.lit.push({ fx, fy, rx, ry, ux: (ax - fx) / mpp, uy: (ay - fy) / mpp, a, bus: v.bus, mpp });
+    }
     for (const { v, c, d, a } of items) {
       this.fadeA = a;
       ctx.globalAlpha = a;
