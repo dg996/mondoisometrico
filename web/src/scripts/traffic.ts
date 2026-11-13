@@ -49,6 +49,8 @@ interface Vehicle {
   born?: number;
   /** drawn heading, eased toward the road's so the body turns smoothly through bends and junctions */
   hd?: [number, number];
+  /** sim time of the last heading update */
+  hdT?: number;
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -75,6 +77,7 @@ const ATAC_COLORS: Array<[number, number, number]> = [[178, 34, 42], [178, 34, 4
 const GUIDE_CELL = 25, OFF_ROUTE = 16, BUS_SPEED = 6; // m, m, m/s average incl. stops
 /** lane width (m): lanes are laid out from the centre line, so wide roads keep traffic off the kerb */
 const LANE_W = 3.4;
+const INFER_LANES = true;
 /** fade-in after (re)appearing (s) and fade-out over the last metres before leaving the drawn graph */
 const FADE_IN = 0.7, FADE_OUT_M = 5;
 
@@ -119,7 +122,7 @@ export class Traffic {
       const ww = r.w ?? Math.max(4, r.l * (r.o ? 3.2 : 6.4));
       // OSM often has no lanes tag on wide Roman avenues: one lane each way on a 20 m road sends
       // everything into one file along the kerb. Infer the lanes the drawn asphalt holds.
-      if (r.c <= 4) r.l = Math.max(1, r.l, Math.min(4, Math.floor((r.o ? ww : ww / 2) / LANE_W)));
+      if (INFER_LANES && r.c <= 3) r.l = Math.max(1, r.l, Math.min(2, Math.floor((r.o ? ww : ww / 2) / LANE_W)));
       const w = this.ways.push({ r, n, cum, len: cum[n - 1], w: ww }) - 1;
       const R = Math.min(16, (r.w ?? 6) / 2 + 1.5);
       for (const n of [r.a, r.b]) {
@@ -817,8 +820,11 @@ export class Traffic {
       const alpha = Math.max(0, Math.min(1, born, leaving));
       if (alpha < 0.02) continue;
       // the body turns smoothly: eased toward the road's direction (snaps only on a reversal)
+      // time-based (≈0.15 s), so it behaves the same at any frame rate
+      const k = 1 - Math.exp(-Math.max(0, this.t - (v.hdT ?? this.t)) / 0.15);
+      v.hdT = this.t;
       if (v.hd && v.hd[0] * dx + v.hd[1] * dy > -0.2) {
-        const hx = v.hd[0] + (dx - v.hd[0]) * 0.22, hy = v.hd[1] + (dy - v.hd[1]) * 0.22, hl = Math.hypot(hx, hy) || 1;
+        const hx = v.hd[0] + (dx - v.hd[0]) * k, hy = v.hd[1] + (dy - v.hd[1]) * k, hl = Math.hypot(hx, hy) || 1;
         v.hd = [hx / hl, hy / hl];
       } else v.hd = [dx, dy];
       const [sx, sy] = proj(c);
