@@ -2,7 +2,7 @@
 
 Mappa isometrica di Roma da open data
 ([mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)).
-Leggere prima `README.md`, `HOSTING.md` e `ATTRIBUTION.md`. Tutto è TypeScript; il sito è Astro + OpenSeadragon.
+Leggere prima `docs/sviluppo.md`, `HOSTING.md` e `ATTRIBUTION.md` (il `README.md` è la presentazione del progetto, senza istruzioni). Tutto è TypeScript; il sito è Astro + OpenSeadragon.
 
 ## Hard rules
 
@@ -32,7 +32,7 @@ Leggere prima `README.md`, `HOSTING.md` e `ATTRIBUTION.md`. Tutto è TypeScript;
   the origin, which share the map and can be scrolled between.
 - **City** (`CITIES` in `places.ts`): a named view into a region. `/<city-slug>` opens the region centred
   on it. Slugs are lowercase, ASCII, hyphenated (`tel-aviv-yafo`); capitalised links redirect (404 page).
-- **Hosting** (`pipeline/src/hosting.ts`, README "Hosting"): tiles and region data live only on R2
+- **Hosting** (`pipeline/src/hosting.ts`, `HOSTING.md`): tiles and region data live only on R2
   (`mondoisometricotiles`, `regions/<region>/` under `TILES_ORIGIN` from `.env`), never in git or
   `web/public`. `export` writes changed files to the cache `data/web/regions/<region>/`, `npm run dev` shows
   the cache over production, `publish` uploads and empties the cache.
@@ -98,7 +98,7 @@ not from the render itself (flat massing and aerial photos were both rejected).
   the rings start). Painting a whole city takes many hours; run it in the background and re-export as you go
   (`pipeline/watch-export.sh`), previewing with `npm run dev`.
 
-### 5. Run (per area; see README for flags)
+### 5. Run (per area; see docs/sviluppo.md for flags)
 
 ```sh
 npm -w pipeline run boundaries -- <region>   # new region only

@@ -1,49 +1,66 @@
 # Mondo Isometrico
 
-Mappa isometrica di **Roma** costruita da open data.
+**Roma come non l'hai mai vista: una mappa isometrica dipinta, viva, da esplorare dall'alto fino ai sampietrini.**
 
-**Sito:** [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
+### → [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
 
-## Cosa c’è
+![Il centro storico di Roma dall'alto: il Tevere, Castel Sant'Angelo, il Pantheon, l'Altare della Patria, il Colosseo e il Circo Massimo](docs/images/roma.jpg)
 
-- Regione `roma-centro` (origine: Piazza Venezia, heading 45°)
-- Città `/roma` (default) — Pantheon / centro storico
-- Area di test `pantheon` (~800 m: Pantheon → Piazza Navona)
-- Tile su Cloudflare R2 (`mondoisometricotiles`), sito su Vercel + Worker Cloudflare
+Mondo Isometrico è una mappa di Roma in prospettiva isometrica, come una grande illustrazione da
+sfogliare. Ogni palazzo, strada, albero e monumento è al suo posto vero, ricostruito da dati aperti
+(OpenStreetMap, la Carta Tecnica della Regione Lazio, i rilievi del terreno di Copernicus) e poi
+dipinto, tessera dopo tessera, con l'intelligenza artificiale.
 
-## Avvio rapido
+Si parte dalla città intera e si scende fino al dettaglio: le arcate del Colosseo, le statue
+dell'Altare della Patria, le strisce pedonali, le singole auto.
 
-Serve Node 24+, Chromium/Chrome (`CHROME_PATH`), e per publish/deploy un account Cloudflare + wrangler.
+## Una città che si muove
 
-```sh
-cp .env.example .env   # TILES_ORIGIN, CLOUDFLARE_ACCOUNT_ID, SITE_DOMAIN
-npm install
-npm run dev            # http://localhost:<port>/roma
-```
+![Piazza Venezia: auto e bus ATAC che girano attorno all'Altare della Patria](docs/images/piazza-venezia.jpg)
 
-Batch Roma, QA e rilascio unico: **[docs/roma-quality-batch.md](docs/roma-quality-batch.md)**.
-Hosting e DNS: **[HOSTING.md](HOSTING.md)**.  
-Regole pipeline / agenti: **[AGENTS.md](AGENTS.md)**.
+- **Traffico sulle strade vere.** Auto, taxi e furgoni girano sulla rete stradale di OpenStreetMap,
+  rispettano i sensi unici, si fermano agli incroci e prima delle strisce pedonali.
+- **Bus e tram delle linee reali.** I bus ATAC seguono i percorsi veri, con il numero di linea sul
+  tetto, e i tram corrono sui loro binari; di notte girano le linee notturne.
+- **L'ora e il meteo di Roma, adesso.** La luce segue il sole sopra Roma minuto per minuto, dal mattino
+  all'ora dorata alla notte; se a Roma piove, sulla mappa piove, con l'intensità vera.
+- **Cantieri al confine.** Dove la pittura non è ancora arrivata, piccole squadre di pittori stendono
+  la vernice tra coni e transenne: la mappa cresce a ogni aggiornamento.
 
-## Pipeline (patch di test)
+## I monumenti, come sono davvero
 
-```sh
-npm -w pipeline run boundaries -- roma-centro
-npm run fetch -- pantheon
-npm run ground -- pantheon
-npm run scene -- pantheon
-npm run render -- pantheon -j 2
-npm run paint -- pantheon --center 41.8986,12.4769   # Codex CLI; rivedere prima di espandere
-npm run export -- pantheon
-npm run publish -- roma-centro   # solo con conferma esplicita
-npx vercel --prod              # solo dopo QA e publish R2 del batch completo
-```
+| | |
+|---|---|
+| ![Il Colosseo](docs/images/colosseo.jpg) | ![Castel Sant'Angelo e il Tevere](docs/images/castel-sant-angelo.jpg) |
+| **Colosseo** | **Castel Sant'Angelo** |
+| ![Il Campidoglio di Michelangelo con la Cordonata e la scalinata dell'Aracoeli](docs/images/campidoglio.jpg) | ![La stazione Termini](docs/images/termini.jpg) |
+| **Campidoglio**, con la Cordonata e la piazza di Michelangelo | **Termini** |
 
-## Licenza
+Ogni monumento è controllato contro OpenStreetMap e Wikidata: scalinate della loro larghezza vera,
+piazze con il loro disegno, nessun edificio inventato o spostato.
 
-Codice: [MIT](LICENSE).  
-Immagini della mappa: CC BY 4.0 + crediti dati in [ATTRIBUTION.md](ATTRIBUTION.md).
+## Di giorno, di sera, sotto la pioggia
+
+| | |
+|---|---|
+| ![Il centro storico la sera](docs/images/sera.jpg) | ![Piazza Venezia sotto la pioggia](docs/images/pioggia.jpg) |
+| **La sera** | **Quando piove a Roma** |
+
+## Anche in tasca
+
+<img src="docs/images/telefono.jpg" alt="La mappa su telefono, sul Colosseo" width="300">
+
+Funziona sul telefono come sul computer: si trascina, si allarga con due dita, si condivide la vista
+esatta con un tocco. E se qualcosa non torna o hai un'idea, c'è il pulsante **Segnala un problema o
+un'idea** direttamente sulla mappa.
 
 ---
 
-Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun.
+**Fonti dei dati:** © OpenStreetMap contributors (ODbL), Regione Lazio CTRN (CC BY 4.0), ESA WorldCover
+2021 (CC BY 4.0), Copernicus DEM, Roma Servizi per la Mobilità (CC BY-SA), Open-Meteo (CC BY 4.0).
+Dettagli e obblighi di licenza in [ATTRIBUTION.md](ATTRIBUTION.md). Mappa dipinta con l'AI.
+
+Codice: [MIT](LICENSE) · Immagini della mappa: CC BY 4.0 · Note tecniche: [docs/sviluppo.md](docs/sviluppo.md)
+
+Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun ·
+Realizzato da [Domenico Gagliardi](https://domenicogagliardi.com)
