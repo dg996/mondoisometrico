@@ -30,9 +30,9 @@ const R_EARTH = 6371000;
 
 /**
  * k: kind (drawn by page/renderer.ts), r: polygon rings (even-odd) or l: polyline,
- * w: line width (m), o: one-way, n: lanes, y: layer (bridges above)
+ * w: line width (m), o: one-way, n: lanes, y: layer (bridges above), p: stair tread pitch (m)
  */
-export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0 }
+export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0; p?: number }
 
 const name = process.argv[2] ?? "roma-core";
 const area = openArea(name);
@@ -122,6 +122,53 @@ function fillGrid(rings: P2[][], g: Grid, cb: (i: number) => void) {
 // ---- OSM features --------------------------------------------------------------------------
 const PATH: Record<string, number> = { pedestrian: 5, footway: 2.2, path: 1.6, cycleway: 2, steps: 2.5, bridleway: 2, corridor: 2 };
 
+/** OSM `width` in metres ("12", "6.00m", "3,5 m", "10 metres"); feet, ranges and junk -> undefined. */
+export function osmMetres(v: string | undefined): number | undefined {
+  const m = String(v ?? "").trim().replace(",", ".").match(/^(\d+(?:\.\d+)?)\s*(?:m|metres?|meters?)?$/i);
+  const w = m ? Number(m[1]) : NaN;
+  return w > 0 && w < 200 ? w : undefined;
+}
+
+/** Point in even-odd polygon. */
+function insideRing([x, y]: P2, r: P2[]) {
+  let c = false;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++)
+    if (r[i][1] > y !== r[j][1] > y && x < r[i][0] + ((y - r[i][1]) * (r[j][0] - r[i][0])) / (r[j][1] - r[i][1])) c = !c;
+  return c;
+}
+/**
+ * Width of a stair flight measured on its mapped outline (area:highway=steps, e.g. the Cordonata and
+ * the Aracoeli flight on the Campidoglio): median chord of the polygon across the steps line at 1/4,
+ * 1/2 and 3/4 of its length. null when no outline contains the line.
+ */
+function stairWidth(l: P2[], outlines: P2[][]): number | null {
+  const [ax, ay] = l[0], [bx, by] = l.at(-1)!, L = Math.hypot(bx - ax, by - ay);
+  if (L < 1) return null;
+  const nx = -(by - ay) / L, ny = (bx - ax) / L, mid: P2 = [(ax + bx) / 2, (ay + by) / 2];
+  for (const r of outlines) {
+    if (!insideRing(mid, r)) continue;
+    const chords: number[] = [];
+    for (const f of [0.25, 0.5, 0.75]) {
+      const px = ax + (bx - ax) * f, py = ay + (by - ay) * f, hits: number[] = [];
+      for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+        const ex = r[i][0] - r[j][0], ey = r[i][1] - r[j][1], den = nx * ey - ny * ex;
+        if (Math.abs(den) < 1e-9) continue;
+        const t = ((r[j][0] - px) * ey - (r[j][1] - py) * ex) / den, u = ((r[j][0] - px) * ny - (r[j][1] - py) * nx) / den;
+        if (u >= 0 && u <= 1) hits.push(t);
+      }
+      const pos = hits.filter((t) => t > 0), neg = hits.filter((t) => t < 0);
+      // a roughly centred line takes the whole chord; a clearly off-centre one (one of several lines in a
+      // wide flight) only twice its nearer side, so the drawn flight never spills out of the outline
+      if (pos.length && neg.length) {
+        const a = Math.min(...pos), b = -Math.max(...neg);
+        chords.push(Math.min(a, b) >= 0.6 * Math.max(a, b) ? a + b : 2 * Math.min(a, b));
+      }
+    }
+    if (chords.length) return chords.sort((a, b) => a - b)[Math.floor(chords.length / 2)];
+  }
+  return null;
+}
+
 function areaKind(t: Record<string, string>): string | null {
   const lu = t.landuse, le = t.leisure, na = t.natural, am = t.amenity;
   if (na === "water" || t.water || t.waterway === "riverbank" || lu === "basin" || lu === "reservoir") return "water";
@@ -150,6 +197,22 @@ function areaKind(t: Record<string, string>): string | null {
 }
 
 const osm = readJson(join(RAW, name, "ground.json"));
+/** mapped stair outlines (area:highway=steps): flights drawn at their measured width */
+const stairOutlines: P2[][] = [];
+for (const el of osm.elements)
+  if (el.type === "way" && el.geometry && el.tags?.["area:highway"] === "steps") {
+    const g = el.geometry.map((q: { lat: number; lon: number }) => toEnu(q.lon, q.lat));
+    if (closed(g)) stairOutlines.push(g);
+  }
+let stairsFitted = 0;
+/** squares (place=square): a closed pedestrian loop inside one is a pavement pattern (Campidoglio oval) */
+const squares: P2[][] = [];
+for (const el of osm.elements)
+  if (el.type === "way" && el.geometry && el.tags?.place === "square") {
+    const g = el.geometry.map((q: { lat: number; lon: number }) => toEnu(q.lon, q.lat));
+    if (closed(g)) squares.push(g);
+  }
+let squareRings = 0;
 
 // Rome: street widths from the surveyed building fronts (Regione Lazio CTRN volumes). OSM lanes count
 // only moving lanes, so Via del Corso / Via Nazionale came out 12 m wide between façades 20–32 m apart
@@ -243,13 +306,33 @@ for (const el of osm.elements) {
         || (!sidewalkTag && sett && /^(residential|living_street|service|unclassified|pedestrian)$/.test(t.highway)); // Roman vicoli in sampietrini
       const oneway = isOneway(t);
       const lanes = Number(t.lanes) || 0;
-      let w = road ? roadWidth(t) : Number(String(t.width).replace(",", ".")) || path;
+      let w = road ? roadWidth(t) : osmMetres(t.width) ?? path;
+      // stairs: OSM width, else the width of the mapped flight outline (never narrower than the default)
+      let pitch: number | undefined;
+      if (t.highway === "steps") {
+        if (!osmMetres(t.width)) {
+          const fit = stairWidth(g, stairOutlines);
+          if (fit && fit > w) { w = Math.min(fit, 40); stairsFitted++; }
+        }
+        // tread pitch from the mapped step count (Cordonata: 22 deep treads; Aracoeli: 123 steep ones)
+        const n = Number(t.step_count);
+        if (n >= 2) pitch = Math.min(4, Math.max(0.28, wayLength(el.geometry) / n));
+      }
       // explicit OSM width wins; otherwise fit the street between the surveyed façades
       if (road && !t.width && !(t.bridge && t.bridge !== "no") && ["primary", "secondary", "tertiary", "unclassified", "residential", "living_street"].includes(t.highway)) {
         const gap = facadeGap(g);
         if (gap) {
           const fit = Math.min(gap - (road[1] && !noSidewalk ? 5.4 : 1), w * 2.2);
           if (fit > w + 0.5) { w = fit; widened++; }
+        }
+      }
+      // a closed pedestrian loop (not an area) inside a mapped square is the outline of its pavement
+      // design, e.g. Michelangelo's oval on Piazza del Campidoglio: drawn as an inlaid ring, not a 5 m band
+      if (t.highway === "pedestrian" && closed(g) && g.length >= 8) {
+        const c: P2 = [g.reduce((a, q) => a + q[0], 0) / g.length, g.reduce((a, q) => a + q[1], 0) / g.length];
+        if (squares.some((sq) => insideRing(c, sq))) {
+          const r = simplifyRing(g, 0.1);
+          if (r.length >= 4) { features.push({ id: el.id, k: "plazaring", r: [r] }); squareRings++; continue; }
         }
       }
       const kind = road ? (road[1] ? "street" : t.highway.startsWith("motorway") || t.highway.startsWith("trunk") ? "highway" : t.highway === "track" ? "dirtroad" : "lane") : t.highway === "cycleway" ? "cycle" : t.highway === "pedestrian" ? "plaza" : t.highway === "steps" ? "steps" : "path";
@@ -266,6 +349,7 @@ for (const el of osm.elements) {
       if (layer > 0) f.y = layer;
       if (road && sett) f.s = 1;
       if (road && noSidewalk) f.sw = 0;
+      if (pitch) f.p = Math.round(pitch * 100) / 100;
       features.push(f);
       continue;
     }
@@ -307,6 +391,7 @@ for (const [id, u] of nodeUse) {
 // zebras guessed from footpaths meeting a street only where OSM has no mapped crossings at all
 features.push({ k: "junctions", j: junctions } as Feature, { k: "zebras", j: crossings ? [] : zebras } as Feature);
 console.log(`  ${hidden} ways below the surface left out (tunnels, covered, indoor, negative layer)`);
+console.log(`  ${stairsFitted} stair flights widened to their mapped outline (area:highway=steps), ${squareRings} pavement rings in squares`);
 if (facadeSegs.size) console.log(`  ${widened} streets widened to the surveyed façade gap (CTRN)`);
 console.log(`  ${junctions.length} junctions, ${crossings ? `${crossings} OSM marked crossings` : `${zebras.length} guessed zebra crossings`}`);
 

@@ -98,8 +98,10 @@ export const LANDMARKS: Record<string, Landmark[]> = {
     },
     {
       // OSM way 23055100 (place=square) centroid
-      frontBearing: 315, paintRadiusM: 60, name: "Campidoglio", lat: 41.893287, lon: 12.482975, minPx: 0.12, groundMsl: 40,
-      paintHint: "Piazza del Campidoglio (Michelangelo): trapezoidal piazza on the Capitoline hill with the oval star-pattern pavement and the equestrian statue of Marcus Aurelius at its centre, Palazzo Senatorio with its bell tower at the back, the twin Palazzi dei Conservatori and Nuovo on the sides; the Cordonata ramp-stairs descend north-west to Piazza d'Aracoeli. Follow the exact footprints.",
+      // radius 110 m: the foot of the Cordonata (OSM way 36779949) and of the Aracoeli flight (way 86242193)
+      // lie ~100 m from the square's centroid, so windows holding only the stairs get the hint too
+      frontBearing: 315, paintRadiusM: 110, name: "Campidoglio", lat: 41.893287, lon: 12.482975, minPx: 0.12, groundMsl: 40,
+      paintHint: "Piazza del Campidoglio (Michelangelo): trapezoidal piazza on the Capitoline hill, widening toward Palazzo Senatorio (with its bell tower) at the back, between the twin Palazzo dei Conservatori and Palazzo Nuovo. In the middle the input shows Michelangelo's oval pavement: keep it as a slightly sunken oval of pale travertine with a twelve-pointed star of stone bands radiating from a small central oval, and the bronze equestrian statue of Marcus Aurelius on a low pedestal at its exact centre. The Cordonata (the wide striped band, about 10 m across, descending from the piazza's open front toward Piazza d'Aracoeli, north-west) is a broad, gently sloping ramp of deep, shallow stone steps between low balustrades. Beside it the steep Aracoeli staircase (the long finely striped band, about 15 m wide, over 120 steps) climbs along its whole drawn length, from the street at its foot to the plain facade of Santa Maria in Aracoeli at its top; the lawn between the two flights stays one plain lawn. Add no statues on the stairs. Keep both flights exactly where and as wide as the input draws them; do not turn them into plain pavement, grass or streets. Follow the exact footprints.",
     },
     {
       // OSM relation 3376015 centroid

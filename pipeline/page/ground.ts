@@ -7,7 +7,7 @@
 
 import type { SceneBuilding } from "../src/building-shape.ts";
 type P2 = [number, number];
-export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0 }
+export interface Feature { id?: number; bridge?: boolean; k: string; r?: P2[][]; l?: P2[]; w?: number; o?: 1; n?: number; y?: number; j?: number[][]; s?: 1; sw?: 0; p?: number }
 interface Objects { b: SceneBuilding[]; t: Array<[number, number, number, number]> }
 
 const FILL: Record<string, string> = {
@@ -61,6 +61,7 @@ export function drawGround(
     if (k === "pitch") { ctx.lineWidth = 0.25; ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.stroke(); }
     if (k === "pool") { ctx.lineWidth = 0.6; ctx.strokeStyle = "#e9ecee"; ctx.stroke(); }
     if (k === "water") { ctx.lineWidth = 1; ctx.strokeStyle = "rgba(220,235,240,0.5)"; ctx.stroke(); }
+    if (k === "stairs") { ctx.lineWidth = 0.6; ctx.strokeStyle = "#b3a68f"; ctx.stroke(); } // stone cheeks of the flight
     if (k === "excavation") { // sunken: a dark rim on the inside reads as the drop from the street
       ctx.save(); path(f.r!); ctx.clip("evenodd");
       ctx.lineWidth = 5; ctx.strokeStyle = "rgba(70,52,34,0.45)"; ctx.stroke();
@@ -107,18 +108,66 @@ export function drawGround(
 
   // 4. paths and plazas, then pavements under streets
   for (const f of [...of("path"), ...of("plaza"), ...of("cycle")]) stroke(f.l!, f.w!, PATHS[f.k]);
-  // stairs (Spanish Steps, Aracoeli, Campidoglio): light stone with a tread every 0.45 m across the flight
+  // pavement designs inlaid in squares (Michelangelo's oval on the Campidoglio): darker travertine
+  // field with a stone border, larger rings first so inner ones sit on top
+  const ringArea = (r: P2[]) => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) / 2);
+  const rings = of("plazaring").sort((a, b) => ringArea(b.r![0]) - ringArea(a.r![0]));
+  const centroid = (r: P2[]): P2 => [r.reduce((a, p) => a + p[0], 0) / r.length, r.reduce((a, p) => a + p[1], 0) / r.length];
+  /** distance from c to the ring along direction a (first crossing) */
+  const reach = (r: P2[], [cx, cy]: P2, a: number) => {
+    const dx = Math.cos(a), dy = Math.sin(a);
+    let best = Infinity;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const ex = r[i][0] - r[j][0], ey = r[i][1] - r[j][1], den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-9) continue;
+      const t = ((r[j][0] - cx) * ey - (r[j][1] - cy) * ex) / den, u = ((r[j][0] - cx) * dy - (r[j][1] - cy) * dx) / den;
+      if (t > 0 && u >= 0 && u <= 1) best = Math.min(best, t);
+    }
+    return best;
+  };
+  for (const f of rings) {
+    const outer = f.r![0];
+    path(f.r!); ctx.fillStyle = "#d8ccb6"; ctx.fill("evenodd");
+    ctx.lineWidth = 1.0; ctx.strokeStyle = "#9c8d75"; ctx.setLineDash([]); ctx.stroke();
+    // a ring around a smaller concentric ring is a rosette (Campidoglio): twelve-pointed star from the
+    // inner ring out to the oval, tips on the long axis
+    const inner = rings.find((g) => g !== f && ringArea(g.r![0]) < ringArea(outer) * 0.5 && ringArea(g.r![0]) > ringArea(outer) * 0.08
+      && Math.hypot(centroid(g.r![0])[0] - centroid(outer)[0], centroid(g.r![0])[1] - centroid(outer)[1]) < Math.sqrt(ringArea(outer)) * 0.15);
+    if (!inner) continue;
+    const c = centroid(inner.r![0]);
+    let far = 0, axis = 0;
+    for (const [x, y] of outer) { const d = Math.hypot(x - c[0], y - c[1]); if (d > far) { far = d; axis = Math.atan2(y - c[1], x - c[0]); } }
+    ctx.beginPath();
+    for (let k = 0; k < 24; k++) {
+      const a = axis + (k * Math.PI) / 12, r = k % 2 ? reach(inner.r![0], c, a) * 1.08 : reach(outer, c, a) * 0.96;
+      if (!isFinite(r)) continue;
+      const x = c[0] + Math.cos(a) * r, y = c[1] + Math.sin(a) * r;
+      if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "#e9e1d0"; ctx.fill();
+    ctx.lineWidth = 0.5; ctx.strokeStyle = "#9c8d75"; ctx.stroke();
+  }
+  // stairs (Spanish Steps, Aracoeli, Cordonata): light stone flight at its mapped width with a stone
+  // cheek on each side and a shaded riser per tread (OSM step_count pitch, else every 0.45 m)
   for (const f of of("steps")) {
-    const w = Math.max(f.w ?? 2.5, 2.5);
+    // a monumental flight's treads are drawn at least 1 m apart: the art is 0.25 m/px, and the Aracoeli's
+    // real 0.48 m pitch merged into flat pavement in the painting
+    const w = Math.max(f.w ?? 2.5, 2.5), wide = w >= 6, pitch = wide ? Math.max(1, f.p ?? 1) : f.p ?? 0.45;
+    ctx.lineCap = wide ? "butt" : "round"; // a monumental flight ends square on its landings
+    if (wide) stroke(f.l!, w + 1.2, "#b3a68f");
     stroke(f.l!, w, "#ece6d8");
+    ctx.lineCap = "round";
     const l = f.l!;
-    ctx.strokeStyle = "rgba(120,108,90,0.55)"; ctx.lineWidth = 0.08; ctx.setLineDash([]);
+    ctx.strokeStyle = wide ? "rgba(100,86,66,0.8)" : "rgba(120,108,90,0.55)";
+    ctx.lineWidth = wide ? Math.min(0.4, pitch * 0.35) : 0.08;
+    ctx.setLineDash([]);
     for (let k = 1; k < l.length; k++) {
       const [ax, ay] = l[k - 1], [bx, by] = l[k], L = Math.hypot(bx - ax, by - ay);
       if (L < 0.2) continue;
       const nx = -(by - ay) / L, ny = (bx - ax) / L;
       ctx.beginPath();
-      for (let d = 0.2; d < L; d += 0.45) {
+      for (let d = Math.min(0.2, pitch / 2); d < L; d += pitch) {
         const cx = ax + (bx - ax) * d / L, cy = ay + (by - ay) * d / L;
         ctx.moveTo(cx - nx * w / 2, cy - ny * w / 2); ctx.lineTo(cx + nx * w / 2, cy + ny * w / 2);
       }
