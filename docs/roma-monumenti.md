@@ -142,3 +142,23 @@ da ESA WorldCover 2021 (10 m, CC BY 4.0), con questi filtri:
   parte sono disegnati come percorsi), né nei vicoli in sampietrini senza tag.
 - Strisce pedonali: quelle reali di OSM (`footway=crossing`, escluse `unmarked`). Prima venivano
   indovinate dove un vialetto tocca una strada, e quelle vere finivano sotto l'asfalto.
+
+## Traffico, bus e tram (13 novembre 2026, notte)
+
+Controlli sui dati esportati (101 tile dipinte, ~1000 veicoli, 20 minuti simulati;
+`node --import tsx pipeline/src/traffic-overlap-audit.ts 20`):
+
+- **Sovrapposizioni tra veicoli**: da ~100 coppie per fotogramma a ~0,17 su 1000 veicoli. Cause
+  trovate e corrette: incroci reali fatti di più nodi OSM (Piazza Venezia) ora hanno un solo verde;
+  veicoli che rientravano tutti insieme nello stesso punto; strade che convergono ad angolo stretto
+  (la linea di arresto ora è dove le carreggiate smettono di toccarsi); strade di servizio disegnate
+  dentro una carreggiata più grande (escluse dal traffico, restano nel disegno).
+- **Bus**: linee reali GTFS (Roma Servizi per la Mobilità, CC BY-SA); il 97% del tempo i bus sono
+  entro 16 m dal proprio percorso. Quando la linea esce dalla zona dipinta il bus rientra dall'inizio
+  del tratto, come il bus successivo della linea, mai a metà strada.
+- **Tram 8**: le forme GTFS seguono la strada e mettono le due direzioni sulla stessa linea. Ora ogni
+  direzione è agganciata al binario OSM alla sua destra (97% dei punti su un binario mappato); le due
+  direzioni non sono mai a meno di 2,58 m (il tram è largo 2,4 m), nessun tram sulla corsia delle auto.
+- **Monumenti** (`landmark-audit.ts roma-inner`): le posizioni coincidono con OSM entro pochi metri.
+  Le differenze segnalate sono volute (etichetta del Pantheon sulla cupola) o abbinamenti sbagliati
+  dell'audit (Piramide Cestia: 41,87646 12,48086 coincide con 41°52′35″N 12°28′51″E).
