@@ -143,7 +143,7 @@ function loadAnimations() {
   ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, data, transit]) => {
     const roads = activeRoads(decodeRoads(data), world.enu2px, activity);
     if (roads.length) {
-      traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)], 1, transit?.buses ?? []);
+      traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)], 1.3, transit?.buses ?? []);
       traffic.clock = () => ambient.minutes();
     }
     if (transit?.trams?.meta?.length) {

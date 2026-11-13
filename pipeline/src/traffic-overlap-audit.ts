@@ -16,7 +16,7 @@ export function auditTraffic(minutes = 10, sampleEvery = 5) {
   const roads = activeRoads(decodeRoads(JSON.parse(readFileSync(join(dir, world.files.roads), "utf8"))), world.enu2px, new ActivityMask(world.activity));
   const transit = world.files.transit ? JSON.parse(readFileSync(join(dir, world.files.transit), "utf8")) : null;
   const h = (world.camera.headingDeg * Math.PI) / 180;
-  const t = new Traffic(roads, world.enu2px, [Math.sin(h), Math.cos(h)], 1, transit?.buses ?? []) as any;
+  const t = new Traffic(roads, world.enu2px, [Math.sin(h), Math.cos(h)], 1.3, transit?.buses ?? []) as any;
   let poses: Array<{ c: number[]; d: number[]; v: any }> = [];
   t.box = (_c: unknown, _p: unknown, c: number[], d: number[], v: any) => poses.push({ c, d, v });
   const overlaps = new Map<string, number>(); let samples = 0, worst = 0;

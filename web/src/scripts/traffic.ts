@@ -42,6 +42,8 @@ interface Vehicle {
   kind?: "car" | "small" | "taxi" | "van";
   /** out of the drawn graph, waiting for a free entry (not drawn, not in any lane) */
   off?: boolean;
+  /** lateral offset it had on the previous way: eased into the new lane over the first metres */
+  lat0?: number;
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -140,7 +142,12 @@ export class Traffic {
       if (way.len < len + 4) continue;
       // skip ways that are mostly occluded / water-hidden (cars must not spawn in the river)
       if (this.wayVisible(way) < 0.55) continue;
-      const s = len / 2 + this.rand() * (way.len - len);
+      // not inside the junction boxes / merge zones at either end
+      const endNode = dir === 1 ? way.r.b : way.r.a, startNode = dir === 1 ? way.r.a : way.r.b;
+      const lo = len / 2 + Math.max(this.nodeR.get(startNode) ?? 0, this.mergeR.get(`${w}:${dir}:out`) ?? 0);
+      const hi = way.len - len / 2 - Math.max(this.nodeR.get(endNode) ?? 0, this.mergeR.get(`${w}:${dir}:in`) ?? 0) - 1;
+      if (hi <= lo) continue;
+      const s = lo + this.rand() * (hi - lo);
       if (!this.sampleVisible(way, s, dir, len)) continue; // exact spawn point must be on visible asphalt
       const lane = bus ? 0 : Math.floor(this.rand() * way.r.l);
       // never spawn on top of another vehicle
@@ -236,7 +243,7 @@ export class Traffic {
       if (!this.spotFree(pick.w, pick.dir, s, len, existing)) continue;
       if (existing) {
         this.release(existing);
-        Object.assign(existing, { w: pick.w, dir: pick.dir, s, lane, v: 0, next: null, stuck: 0, through: false, off: false });
+        Object.assign(existing, { w: pick.w, dir: pick.dir, s, lane, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined });
         this.insertLane(existing); // later moves in this same step must see it
         return true;
       }
@@ -551,6 +558,19 @@ export class Traffic {
             target = Math.min(target, Math.max(0, gap / HEADWAY), first.v + Math.max(0, gap) * 0.5);
             if (gap < 0.3) target = 0;
           }
+          // a fork: the vehicle ahead may have just taken the other branch; until its rear is out of
+          // the split (where the two carriageways still overlap) it is still in our way
+          for (const o of this.out.get(this.endNode(v)) ?? []) {
+            if (o.w === v.next.w || o.w === v.w) continue;
+            const split = this.mergeR.get(`${o.w}:${o.dir}:out`);
+            if (!split) continue;
+            for (let ln = 0; ln < Math.max(1, this.ways[o.w].r.l); ln++) {
+              const f = this.lanes.get(`${o.w}:${o.dir}:${ln}`)?.[0];
+              if (!f || f.s - f.len / 2 > split) continue;
+              const gap = way.len - (v.s + v.len / 2) + f.s - f.len / 2 - GAP;
+              target = Math.min(target, Math.max(0, gap / HEADWAY), f.v + Math.max(0, gap) * 0.5);
+            }
+          }
         }
         // approaching the junction: slow for the turn; at the stop line wait until it's granted
         const toStop = this.toStop(v);
@@ -572,7 +592,12 @@ export class Traffic {
         // accelerate gently, brake firmly; never overrun the stop point
         v.v = target > v.v ? Math.min(target, v.v + ACCEL * dt) : Math.max(target, v.v - BRAKE * dt);
         if (lead) v.v = Math.min(v.v, Math.max(0, (lead.s - lead.len / 2 - (v.s + v.len / 2) - 0.5) / dt));
+        const before = this.toStop(v);
         v.s += v.v * dt;
+        // without a green, never roll past the stop line into a crossing (fast arrivals overshot it)
+        if (!v.through && v.next && before >= -0.01 && this.toStop(v) < 0 && this.controlled(this.endNode(v)) && v.holding !== this.groupOf(this.endNode(v))) {
+          v.s -= -this.toStop(v); v.v = 0;
+        }
       }
     }
     // move vehicles that have driven past the end of their way onto the next one
@@ -586,13 +611,13 @@ export class Traffic {
         continue;
       }
       if (!v.through) { v.s = way.len - v.len / 2; v.v = 0; continue; } // not granted: hold at the end
-      const over = v.s + v.len / 2 - way.len, nw = this.ways[v.next.w];
+      const over = v.s + v.len / 2 - way.len, nw = this.ways[v.next.w], lat = this.offset(way, v);
       const lane = v.bus ? 0 : Math.min(v.lane, nw.r.l - 1), ns = Math.min(nw.len - v.len / 2, v.len / 2 + over);
       // something was put at the start of that lane during this step: wait at the line instead
       if ((this.lanes.get(`${v.next.w}:${v.next.dir}:${lane}`) ?? []).some((o) => o !== v && Math.abs(o.s - ns) < (o.len + v.len) / 2 + 0.5)) {
         v.s = way.len - v.len / 2; v.v = 0; continue;
       }
-      v.w = v.next.w; v.dir = v.next.dir; v.next = null; v.through = false;
+      v.w = v.next.w; v.dir = v.next.dir; v.next = null; v.through = false; v.lat0 = lat;
       way = nw;
       v.lane = lane;
       v.s = ns;
@@ -626,7 +651,7 @@ export class Traffic {
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       if (!this.spotFree(w, dir, start, v.len, v)) continue;
-      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false });
+      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined });
       this.insertLane(v);
       return;
     }
@@ -639,7 +664,12 @@ export class Traffic {
     const lanes = Math.max(1, r.l);
     const lw = r.o === 0 ? half / lanes : way.w / lanes;
     const o = half - (v.lane + 0.5) * lw;
-    return Math.max(-half + v.wid / 2 + 0.2, Math.min(half - v.wid / 2 - 0.2, o));
+    const lane = Math.max(-half + v.wid / 2 + 0.2, Math.min(half - v.wid / 2 - 0.2, o));
+    // a new way's lane can sit 1–2 m aside from the last one: drift over, don't jump
+    const into = v.s - v.len / 2;
+    if (v.lat0 === undefined || into >= 10) return lane;
+    const f = Math.max(0, into) / 10, e = f * f * (3 - 2 * f);
+    return v.lat0 + (lane - v.lat0) * e;
   }
 
   /** Draw vehicles. `toScreen` maps global art px -> canvas px; `px` = canvas px per art px. */
