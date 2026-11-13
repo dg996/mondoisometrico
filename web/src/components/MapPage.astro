@@ -90,7 +90,10 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<div id="ambient" class="ui" role="group" aria-label="Ora e meteo">
 			<div class="row">
 				<span class="now">Roma <b id="ambient-clock">--:--</b> · <span id="ambient-weather">meteo…</span></span>
-				<button type="button" id="help-toggle" aria-expanded="false" aria-controls="help" title="Aiuto">?</button>
+				<span class="actions">
+					<button type="button" id="share" title="Condividi questa vista" aria-label="Condividi questa vista">Condividi</button>
+					<button type="button" id="help-toggle" aria-expanded="false" aria-controls="help" title="Aiuto">?</button>
+				</span>
 			</div>
 			<div id="help" hidden>
 				<p>Roma disegnata da open data e dipinta con AI. Le zone dipinte crescono a ogni aggiornamento; fuori, la città resta sfocata tra le nuvole.</p>
@@ -159,6 +162,8 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			#ambient .row { display: flex; align-items: center; gap: 8px; }
 			#ambient .row { justify-content: space-between; }
 			#ambient .now { color: #4d463e; }
+			#ambient .actions { display: flex; gap: 6px; flex-shrink: 0; }
+			#ambient button.done { background: #b5643f; color: #fff; }
 			#ambient button { border: 0; background: rgba(0,0,0,0.06); color: inherit; border-radius: 8px; padding: 4px 8px; font: inherit; cursor: pointer; touch-action: manipulation; }
 			#ambient button:hover { background: rgba(0,0,0,0.1); }
 			#ambient button:focus-visible { outline: 2px solid #b5643f; outline-offset: 1px; }
@@ -230,6 +235,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<script>
 			import '../scripts/map.ts';
 			import '../scripts/feedback.ts';
+			import '../scripts/share.ts';
 		</script>
 	</body>
 </html>
