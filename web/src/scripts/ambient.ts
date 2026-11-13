@@ -1,11 +1,12 @@
 /**
  * Ambient light and weather over the painted map, without repainting a tile:
- *  - day cycle: the real sun elevation over Rome drives a light grade (night, blue hour, golden hour,
- *    day) laid over the tiles; live by default, or scrubbed / played from the panel
+ *  - day cycle: the real sun elevation over Rome, now, drives a light grade (night, blue hour, golden
+ *    hour, day) laid over the tiles; visitors cannot change the time
  *  - live weather: current conditions over Rome from Open-Meteo (CC BY 4.0, free for non-commercial
  *    use, cached 15 min): overcast greys the light, rain and drizzle draw falling streaks, fog a veil
  * Film captures (pipeline/src/film.ts sets window.__film) stay neutral daylight: clips are deterministic.
- * Testing: ?ora=21:30 and ?meteo=pioggia|nuvoloso|nebbia|sereno override the live values.
+ * Local development only (astro dev): ?ora=21:30 and ?meteo=pioggia|nuvoloso|nebbia|sereno override the
+ * live values for testing; the published site ignores them.
  */
 
 export interface Weather { code: number; cloud: number; rain: number; temp: number; wind: number; at: number }
@@ -34,8 +35,11 @@ const PRESETS: Record<string, Weather> = {
   nebbia: { code: 45, cloud: 100, rain: 0, temp: 8, wind: 2, at: 0 },
 };
 
+/** Test overrides (?ora, ?meteo) work only on the dev server, never on the published map. */
+const testParam = (name: string) => ((import.meta as { env?: { DEV?: boolean } }).env?.DEV ? new URLSearchParams(location.search).get(name) : null);
+
 export async function fetchWeather(): Promise<Weather | null> {
-  const q = new URLSearchParams(location.search).get("meteo");
+  const q = testParam("meteo");
   if (q && PRESETS[q]) return { ...PRESETS[q], at: Date.now() };
   try {
     const cached = JSON.parse(localStorage.getItem(CACHE_KEY) ?? "null") as Weather | null;
@@ -80,44 +84,37 @@ export function grade(elev: number, cloud: number) {
 export interface Ambient {
   /** draw rain / fog on the overlay canvas for this frame */
   draw(ctx: CanvasRenderingContext2D, w: number, h: number, dt: number): void;
-  /** the simulated clock (minutes since midnight, Rome) — transit runs by it */
+  /** Rome's clock (minutes since midnight): transit runs by it */
   minutes(): number;
 }
 
 /**
- * Panel (#ambient) + tint layer (#ambient-tint). `getTime` is the simulated time shown on the map;
- * live by default, the slider scrubs it, play runs a day in ~60 s.
+ * Panel (#ambient: Rome's clock and weather, read only) + tint layer (#ambient-tint). The time is always
+ * Rome's real time; the light follows it minute by minute.
  */
 export function startAmbient(): Ambient {
   const film = () => Boolean((window as { __film?: unknown }).__film);
   const tint = document.getElementById("ambient-tint") as HTMLDivElement;
   const wash = document.getElementById("ambient-wash") as HTMLDivElement;
-  const slider = document.getElementById("ambient-time") as HTMLInputElement;
   const clock = document.getElementById("ambient-clock")!;
-  const play = document.getElementById("ambient-play") as HTMLButtonElement;
-  const live = document.getElementById("ambient-live") as HTMLButtonElement;
   const meteo = document.getElementById("ambient-weather")!;
   const map = document.getElementById("map")!;
 
-  const fixed = new URLSearchParams(location.search).get("ora")?.match(/^(\d{1,2}):(\d{2})$/);
-  let minutes: number | null = fixed ? Number(fixed[1]) * 60 + Number(fixed[2]) : null; // null = live
-  let playing = false, weather: Weather | null = null;
+  const fixed = testParam("ora")?.match(/^(\d{1,2}):(\d{2})$/);
+  const minutes: number | null = fixed ? Number(fixed[1]) * 60 + Number(fixed[2]) : null; // null = live
+  let weather: Weather | null = null;
 
   const romeNow = () => {
     const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
     return Number(p.find((x) => x.type === "hour")!.value) * 60 + Number(p.find((x) => x.type === "minute")!.value);
   };
   /** the instant whose Rome wall-clock time is `m` minutes today (for the sun position) */
-  const dateAt = (m: number) => { const now = new Date(), d = new Date(now.getTime() + (m - romeNow()) * 60_000); return d; };
+  const dateAt = (m: number) => new Date(Date.now() + (m - romeNow()) * 60_000);
   const show = (m: number) => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(Math.floor(m % 60)).padStart(2, "0")}`;
 
   const apply = () => {
     const m = minutes ?? romeNow();
-    slider.value = String(Math.round(m));
     clock.textContent = show(m);
-    live.classList.toggle("on", minutes === null);
-    play.textContent = playing ? "❚❚" : "▶";
-    play.setAttribute("aria-label", playing ? "Ferma il ciclo del giorno" : "Fai scorrere il giorno");
     if (film()) { tint.style.opacity = "0"; wash.style.opacity = "0"; map.style.filter = ""; return; }
     const g = grade(sunElevation(dateAt(m)), weather?.cloud ?? 0);
     tint.style.backgroundColor = `rgb(${g.mult.map(Math.round).join(",")})`;
@@ -126,15 +123,11 @@ export function startAmbient(): Ambient {
     wash.style.opacity = "1";
     map.style.filter = g.desat > 0.01 ? `saturate(${(1 - g.desat).toFixed(2)})` : "";
   };
-
-  slider.addEventListener("input", () => { minutes = Number(slider.value); playing = false; apply(); });
-  play.addEventListener("click", () => { playing = !playing; if (playing && minutes === null) minutes = romeNow(); apply(); });
-  live.addEventListener("click", () => { minutes = null; playing = false; apply(); });
-  setInterval(() => { if (minutes === null && !playing) apply(); }, 30_000);
+  setInterval(apply, 20_000);
 
   const refresh = async () => {
     weather = await fetchWeather();
-    meteo.textContent = weather ? `Roma adesso: ${Math.round(weather.temp)}° · ${weatherLabel(weather.code)}` : "Meteo non disponibile";
+    meteo.textContent = weather ? `${Math.round(weather.temp)}° · ${weatherLabel(weather.code)}` : "meteo non disponibile";
     apply();
   };
   refresh();
@@ -147,17 +140,17 @@ export function startAmbient(): Ambient {
   return {
     minutes: () => minutes ?? romeNow(),
     draw(ctx, w, h, dt) {
-      if (playing) { minutes = ((minutes ?? romeNow()) + dt * 24) % 1440; apply(); } // a day in ~60 s
       if (film() || !weather) return;
+      // rain stays a light veil of streaks: streets, cars and monuments must read through it at any zoom
       const rainy = weather.rain > 0.05 || (weather.code >= 51 && weather.code <= 67) || (weather.code >= 80 && weather.code <= 99);
-      const want = rainy ? Math.min(900, 160 + weather.rain * 160) * (w * h) / (1600 * 900) : 0;
+      const want = rainy ? Math.min(420, 110 + weather.rain * 70) * (w * h) / (1600 * 900) : 0;
       while (drops.length < want) drops.push([Math.random() * w, Math.random() * h, 0.6 + Math.random() * 0.8]);
       drops.length = Math.min(drops.length, Math.ceil(want));
       if (drops.length) {
         const slant = Math.min(0.5, weather.wind / 60), fall = 900 * dt;
         ctx.save();
-        ctx.strokeStyle = "rgba(225,232,242,0.45)";
-        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = "rgba(228,235,244,0.32)";
+        ctx.lineWidth = 1;
         ctx.beginPath();
         for (const d of drops) {
           d[1] += fall * d[2]; d[0] += fall * d[2] * slant;
@@ -169,7 +162,7 @@ export function startAmbient(): Ambient {
         ctx.restore();
       }
       const foggy = weather.code === 45 || weather.code === 48;
-      fog += ((foggy ? 0.28 : 0) - fog) * Math.min(1, dt);
+      fog += ((foggy ? 0.18 : 0) - fog) * Math.min(1, dt);
       if (fog > 0.01) { ctx.fillStyle = `rgba(236,236,234,${fog.toFixed(3)})`; ctx.fillRect(0, 0, w, h); }
     },
   };

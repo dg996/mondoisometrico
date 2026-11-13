@@ -12,6 +12,8 @@ declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by a
 
 interface World {
   activity?: ActivityCoverage;
+  /** painter crews' spots along the paint boundary (export.ts findWorksites) */
+  worksites?: number[][];
   landmarks?: Record<string, [number, number]>;
   tile_size: number;
   native_zoom: number;
@@ -130,17 +132,19 @@ const globalToViewport = (x: number, y: number) => base().imageToViewportCoordin
 let showBorders = false, showTraffic = true;
 const heading = (world.camera.headingDeg * Math.PI) / 180;
 let traffic: Traffic | null = null, cats: Cats | null = null, trams: import("./trams.ts").Trams | null = null;
+let workers: import("./workers.ts").Workers | null = null;
 // the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
 let animationsRequested = false;
 function loadAnimations() {
   if (animationsRequested || !activity.rects.length) return;
   animationsRequested = true;
   Promise.all([
-    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"), import("./trams.ts"),
+    import("./traffic.ts"), import("./cats.ts"), import("./roads.ts"), import("./trams.ts"), import("./workers.ts"),
     fetch(`${BASE}/data/${files.roads ?? "roads.json"}`).then((r) => (r.ok ? r.json() : [])),
     // real bus and tram lines (Roma Servizi per la Mobilità GTFS, CC BY-SA), when exported
     files.transit ? fetch(`${BASE}/data/${files.transit}`).then((r) => (r.ok ? r.json() : null)) : Promise.resolve(null),
-  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, data, transit]) => {
+  ]).then(([{ Traffic }, { Cats }, { decodeRoads }, { Trams }, { Workers }, data, transit]) => {
+    if (world.worksites?.length) workers = new Workers(world.worksites, world.enu2px);
     const roads = activeRoads(decodeRoads(data), world.enu2px, activity);
     if (roads.length) {
       traffic = new Traffic(roads, world.enu2px, [Math.sin(heading), Math.cos(heading)], 1.3, transit?.buses ?? []);
@@ -155,7 +159,7 @@ function loadAnimations() {
     if (roads.length) cats = new Cats(roads, world.enu2px);
     // Unbounded scenic flight routes escape the ready area. Keep them inactive until routes
     // can be certified against the same coverage mask as the road graph.
-    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __parrots: null, __planes: null });
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __workers: workers, __parrots: null, __planes: null });
   });
 }
 setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
@@ -268,6 +272,10 @@ function frame(t: number) {
   if (cats && showTraffic && px >= 0.6) {
     cats.step(dt);
     cats.draw(ctx, toScreen, px, [0, 0, w, hgt]);
+  }
+  if (workers && showTraffic && px >= 0.35) { // painter crews where the painting is still being laid
+    workers.step(dt);
+    workers.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
   ctx.restore();
   ambient.draw(ctx, w, hgt, dt); // rain / fog of the live weather (screen space, over the map)

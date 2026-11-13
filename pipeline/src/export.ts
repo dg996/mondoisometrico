@@ -69,6 +69,9 @@ const edgeDistance = (x: number, y: number) => Math.min(Math.max(0, ...outlines.
 
 /** Exact painted keys also drive the client activity mask. */
 let paintedArt = new Set<string>();
+/** Work sites for the viewer's painter crews (workers.ts): street spots in the band where the painting
+ *  fades into the not yet painted city. [e, n, u, dirE, dirN, width, depth 0..1 into the fade] */
+let worksites: number[][] = [];
 
 /** Native web tile at global art px (x0, y0): fade alpha near the map edge (null = fully inside). */
 /** Any part of the web tile at (x0, y0) inside the cloud band (or beyond it)? */
@@ -405,9 +408,52 @@ async function exportRoads(areas: string[], heights: Heights) {
       if (!w.s[k+3]) break;
     }
   }
+  worksites = await findWorksites(ways, heights);
   occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);
   writeData("roads", JSON.stringify(encodeRoads(ways)));
   console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
+}
+
+/**
+ * Spots for the painter crews: ground-level streets (not bridges, not under anything, carriageway
+ * visible on the height pass) inside the fade band where the painting meets the not yet painted city
+ * (never next to the clouds at the map's outer edge). One per ~250 m of that boundary, the widest
+ * street of each cell, so crews stand on asphalt or piazza, never on a roof.
+ */
+async function findWorksites(ways: Array<{ c: number; w: number; y: number; bridge: boolean; s: number[]; waterAt: (x: number, y: number) => boolean }>, heights: Heights) {
+  const CELL = 1000, best = new Map<string, number[]>();
+  for (const w of ways) {
+    if (w.bridge || w.y > 0 || w.c > 4 || w.w < 5) continue;
+    for (let k = 8; k + 8 < w.s.length; k += 16) { // every ~8 m
+      const e = w.s[k], n = w.s[k + 1], u = w.s[k + 2];
+      const [x, y] = enuToPixel([e, n, u]);
+      if (!paintedArt.has(key(Math.floor(x / CAMERA.tile), Math.floor(y / CAMERA.tile)))) continue;
+      const d = paintedDistance(paintedArt, x, y, CAMERA.tile);
+      if (d < FEATHER * 0.18 || d > FEATHER * 0.6) continue;
+      if (edgeDistance(x, y) < EDGE1) continue; // that edge is the clouds, not a work site (edgeDistance tops out near EDGE1 + EDGE0 / 2)
+      const dx = w.s[k + 4] - w.s[k - 4], dy = w.s[k + 5] - w.s[k - 3], L = Math.hypot(dx, dy);
+      if (!L) continue;
+      let ok = true;
+      for (const off of [-w.w / 2, 0, w.w / 2]) {
+        const q: [number, number, number] = [e + (dy / L) * off, n - (dx / L) * off, u];
+        if (w.waterAt(q[0], q[1])) { ok = false; break; }
+        for (const lift of [0, 1.6, 3.2]) {
+          const [qx, qy] = enuToPixel([q[0], q[1], q[2] + lift]);
+          await heights.ensure(qx, qy);
+          if (!roadSurfaceSafe(heights.at(qx, qy), enuHeight([q[0], q[1], q[2] + lift]), lift === 0)) { ok = false; break; }
+        }
+        if (!ok) break;
+      }
+      if (!ok) continue;
+      const cell = `${Math.floor(x / CELL)}_${Math.floor(y / CELL)}`, score = w.w - Math.abs(d / FEATHER - 0.35) * 10;
+      const prev = best.get(cell);
+      if (!prev || score > prev[7]) best.set(cell, [Math.round(e * 10) / 10, Math.round(n * 10) / 10, Math.round(u * 10) / 10,
+        Math.round((dx / L) * 1000) / 1000, Math.round((dy / L) * 1000) / 1000, w.w, Math.round((d / FEATHER) * 100) / 100, score]);
+    }
+  }
+  const sites = [...best.values()].map((v) => v.slice(0, 7));
+  console.log(`  worksites: ${sites.length} painter crews along the paint boundary`);
+  return sites;
 }
 
 /**
@@ -732,6 +778,7 @@ async function main() {
     tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
     playable: [[py0, px0], [py1, px1]],
     activity: { version: 1, tileSize: CAMERA.tile, tiles: [...paintedArt].sort(), bounds: playable },
+    worksites,
     landmarks: Object.fromEntries((LANDMARKS[Object.keys(CITIES).find(c => CITIES[c].region === activeRegion()) ?? ""] ?? [])
       .map(lm => [lm.name, projectLandmark(lm)])),
     origin: [ox, oy], size: [Math.ceil((x1 - ox) / block) * block, Math.ceil((y1 - oy) / block) * block],
