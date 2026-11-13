@@ -29,6 +29,24 @@ export class Trams {
   private trams: Tram[] = [];
   clock: () => number = () => 12 * 60;
   drawn = 0;
+  /** vehicle bodies in ENU [ax, ay, bx, by, half width] (map.ts wires traffic.ts in): a tram brakes
+   *  for a car standing on its track */
+  obstacles: (() => number[][]) | null = null;
+  /** tram car bodies for the cars, [ax, ay, bx, by, half width] */
+  footprints(): number[][] {
+    if (!this.running()) return [];
+    const out: number[][] = [];
+    for (const tr of this.trams) {
+      const track = this.tracks[tr.t];
+      for (let k = 0; k < CARS; k++) {
+        const s0 = tr.s - k * (CAR + GAP_CARS);
+        if (s0 - CAR < 0 || s0 > track.len) continue;
+        const a = this.pos(track, s0), b = this.pos(track, s0 - CAR);
+        out.push([a[0], a[1], b[0], b[1], WIDTH / 2]);
+      }
+    }
+    return out;
+  }
   /** head / tail lights of the trams drawn in the last frame (lights.ts) */
   lit: import("./lights.ts").CarLight[] = [];
 
@@ -124,6 +142,17 @@ export class Trams {
       for (let o = 0; o <= LENGTH; o += 4) pts.push(this.pos(track, tr.s - o));
       return pts;
     });
+    const cars = this.obstacles?.() ?? [];
+    const carGrid = new Map<string, number[][]>();
+    for (const c of cars) { const k = `${Math.floor((c[0] + c[2]) / 40)}_${Math.floor((c[1] + c[3]) / 40)}`; (carGrid.get(k) ?? carGrid.set(k, []).get(k)!).push(c); }
+    const carAt = (x: number, y: number) => {
+      const cx = Math.floor(x / 20), cy = Math.floor(y / 20);
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const c of carGrid.get(`${cx + i}_${cy + j}`) ?? []) {
+        const sx = c[2] - c[0], sy = c[3] - c[1], SL = sx * sx + sy * sy || 1, t = Math.max(0, Math.min(1, ((x - c[0]) * sx + (y - c[1]) * sy) / SL));
+        if (Math.hypot(x - c[0] - sx * t, y - c[1] - sy * t) < c[4] + WIDTH / 2 + 0.2) return true;
+      }
+      return false;
+    };
     for (const tr of this.trams) {
       const track = this.tracks[tr.t];
       // free distance ahead: walk the track in 2 m steps until another tram's body is within 3 m
@@ -136,6 +165,7 @@ export class Trams {
           if (k === tr.id) continue;
           for (const [bx, by] of bodies[k]) if (Math.hypot(bx - x, by - y) < 2.4) { hit = true; break; } // oncoming trams pass at ~3.5 m
         }
+        if (!hit && cars.length && carAt(x, y)) hit = true; // a car on the track: brake for it
         if (hit) { free = o; break; }
       }
       // conflict zones ahead: claim the zone early enough to stop before it; without the claim, stop short

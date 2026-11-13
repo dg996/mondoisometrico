@@ -184,6 +184,8 @@ function loadAnimations() {
       trams = new Trams(activeRoads(tracks, world.enu2px, activity), transit.trams.meta, world.enu2px, [Math.sin(heading), Math.cos(heading)]);
       trams.clock = () => ambient.minutes();
     }
+    // cars and trams see each other: neither drives into the other
+    if (traffic && trams) { const tf = traffic, tm = trams; tf.obstacles = () => tm.footprints(); tm.obstacles = () => tf.feet; }
     if (roads.length) cats = new Cats(roads, world.enu2px);
     // lamps on every street of the painted area, also the lanes hidden behind roofs (their glow shows)
     if (roads.length) lights = new Lights(allRoads, world.enu2px, (x, y) => !world.activity || activity.containsRect(x, y));

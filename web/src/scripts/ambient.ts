@@ -97,7 +97,7 @@ export function grade(elev: number, cloud: number) {
   // night stays readable (streets, cars and monuments under the street lamps of lights.ts)
   if (elev < -8) mult = [84, 98, 150];
   else if (elev < 0) { const t = (elev + 8) / 8; mult = [lerp(84, 210, t), lerp(98, 200, t), lerp(150, 218, t)]; wash = [90, 110, 190, lerp(0.10, 0.06, t)]; }
-  else if (elev < 12) { const t = elev / 12; mult = [255, lerp(214, 252, t), lerp(170, 245, t)]; wash = [255, 170, 90, lerp(0.16, 0, t)]; }
+  else if (elev < 12) { const t = elev / 12; mult = [255, lerp(200, 252, t), lerp(150, 245, t)]; wash = [255, lerp(150, 170, t), lerp(70, 90, t), lerp(0.2, 0, t)]; } // golden hour: orange towards sunset
   // overcast: flatter, greyer light (never as dark as night)
   const c = Math.min(1, Math.max(0, (cloud - 40) / 60)) * (elev > -4 ? 1 : 0.3);
   mult = mult.map((v) => lerp(v, v * 0.86 + 20, c)) as [number, number, number];
@@ -112,7 +112,7 @@ export type DayMode = "live" | "giorno" | "pomeriggio" | "notte";
 /** sun elevation (°) and transit clock (min) of each fixed mode: night buses by night */
 const MODES: Record<Exclude<DayMode, "live">, { elev: number; clock: number }> = {
   giorno: { elev: 48, clock: 11 * 60 },
-  pomeriggio: { elev: 7, clock: 17 * 60 + 30 },
+  pomeriggio: { elev: 1.5, clock: 17 * 60 + 30 }, // the sun low over the roofs: golden, sunset light
   notte: { elev: -20, clock: 23 * 60 + 30 },
 };
 

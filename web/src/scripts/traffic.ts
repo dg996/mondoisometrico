@@ -734,6 +734,7 @@ export class Traffic {
   /** Vehicles whose nose (1 m ahead of the front) would touch another body: a hairpin, two exits
    *  diverging, a crossing the lane logic does not see. Checked only near way ends (cheap). */
   private blockedAhead() {
+    this.feet = []; this.feetOf = [];
     const CELL = 20, grid = new Map<string, Array<{ v: Vehicle; a: [number, number]; b: [number, number] }>>();
     for (const v of this.vehicles) {
       if (v.off) continue;
@@ -742,6 +743,7 @@ export class Traffic {
       const L0 = Math.hypot(b0[0] - a0[0], b0[1] - a0[1]) || 1, off = this.offset(this.ways[v.w], v);
       const nx = ((b0[1] - a0[1]) / L0) * off, ny = (-(b0[0] - a0[0]) / L0) * off;
       const a: [number, number] = [a0[0] + nx, a0[1] + ny], b: [number, number] = [b0[0] + nx, b0[1] + ny];
+      this.feet.push([a[0], a[1], b[0], b[1], v.wid / 2]); this.feetOf.push(v);
       const k = `${Math.floor((a[0] + b[0]) / 2 / CELL)}_${Math.floor((a[1] + b[1]) / 2 / CELL)}`;
       (grid.get(k) ?? grid.set(k, []).get(k)!).push({ v, a, b });
     }
@@ -777,11 +779,43 @@ export class Traffic {
     return out;
   }
 
+  /** tram car bodies in ENU [ax, ay, bx, by, half width] (map.ts wires trams.ts in): cars never
+   *  drive into a tram, they wait until it has passed */
+  obstacles: (() => number[][]) | null = null;
+  /** this step's vehicle bodies in ENU [ax, ay, bx, by, half width] (trams.ts brakes for them) */
+  feet: number[][] = [];
+
+  /** vehicle of each entry of `feet` */
+  private feetOf: Vehicle[] = [];
+
+  /** Vehicles whose nose (or a front corner) would touch a tram body (bodies from blockedAhead). */
+  private blockedByTrams() {
+    const out = new Set<Vehicle>(), segs = this.obstacles?.() ?? [];
+    if (!segs.length) return out;
+    // tram cars in a 30 m grid: only the few vehicles near a tram are tested
+    const grid = new Map<string, number[][]>();
+    for (const sg of segs) { const k = `${Math.floor((sg[0] + sg[2]) / 60)}_${Math.floor((sg[1] + sg[3]) / 60)}`; (grid.get(k) ?? grid.set(k, []).get(k)!).push(sg); }
+    for (let f = 0; f < this.feet.length; f++) {
+      const [ax, ay, bx, by, hw] = this.feet[f], cx = Math.floor(bx / 30), cy = Math.floor(by / 30);
+      let near: number[][] | null = null;
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) { const g = grid.get(`${cx + i}_${cy + j}`); if (g) (near ??= []).push(...g); }
+      if (!near) continue;
+      const v = this.feetOf[f], L0 = Math.hypot(bx - ax, by - ay) || 1, ux = (bx - ax) / L0, uy = (by - ay) / L0;
+      const probes = [[bx + ux * 1.5, by + uy * 1.5], [bx + ux * 0.5 + uy * hw, by + uy * 0.5 - ux * hw], [bx + ux * 0.5 - uy * hw, by + uy * 0.5 + ux * hw], [(ax + bx) / 2, (ay + by) / 2]];
+      for (const sg of near) {
+        const sx = sg[2] - sg[0], sy = sg[3] - sg[1], SL = sx * sx + sy * sy || 1;
+        if (probes.some(([px, py]) => { const t = Math.max(0, Math.min(1, ((px - sg[0]) * sx + (py - sg[1]) * sy) / SL)); return Math.hypot(px - sg[0] - sx * t, py - sg[1] - sy * t) < sg[4] + 0.35; })) { out.add(v); break; }
+      }
+    }
+    return out;
+  }
+
   step(dt: number) {
     dt = Math.min(dt, 0.1);
     this.t += dt;
     this.regroup();
     const blocked = this.blockedAhead();
+    const tramBlocked = this.blockedByTrams();
     for (const g of this.lanes.values()) {
       for (let k = 0; k < g.length; k++) {
         const v = g[k], way = this.ways[v.w];
@@ -832,6 +866,7 @@ export class Traffic {
           if (way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 5 + Math.max(0, toStop) * 0.3);
         } else if (v.through && way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 7);
         if (blocked.has(v)) { target = 0; if (v.v < 0.5) v.stuck += dt; } // two noses in each other's way: the escape below sorts it out
+        if (tramBlocked.has(v)) { target = 0; v.v = Math.min(v.v, 1); } // a tram in the way: wait until it has passed
         // left the crossing behind (this way leads out of it and the rear has cleared the box): release it
         if (v.holding >= 0) {
           const start = v.dir === 1 ? way.r.a : way.r.b;
