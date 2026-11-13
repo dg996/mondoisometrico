@@ -78,8 +78,14 @@ export const LANDMARKS: Record<string, Landmark[]> = {
     // verified 2026-11-12: Wikidata Q545404 P625
     { name: "Isola Tiberina", lat: 41.890833, lon: 12.477222, minPx: 0.12, groundMsl: 6 },
     { name: "Trastevere", lat: 41.891159, lon: 12.466846, minPx: 0.1, groundMsl: 20 },
-    // verified 2026-11-12: OSM way 23276946 (station building) centroid
-    { name: "Termini", lat: 41.901184, lon: 12.501666, minPx: 0.08, groundMsl: 55 },
+    {
+      // verified 2026-11-12: OSM way 23276946 (station building, Wikidata Q754485) centroid. Its long side runs at
+      // 39/219 degrees, so the front onto Piazza dei Cinquecento faces 309 (north-west). Radius 200 m: the front
+      // (210 m), the 10-storey office block behind it (part 1180155262) and the Servian Wall (way 112675404).
+      frontBearing: 309, paintRadiusM: 200, name: "Termini", lat: 41.901184, lon: 12.501666, minPx: 0.08, groundMsl: 55,
+      paintHint: "Roma Termini station (1950 modernist front by Montuori and Vitellozzi, side wings by Angiolo Mazzoni): NOT a palazzo with a tiled roof. The wide, low block whose long side faces the piazza (north-west) is the glazed ticket hall: a continuous glass front and a pale concrete roof whose front edge undulates in a long series of shallow waves, cantilevered over the pavement (the 'dinosauro'). The tall, narrow block right behind it, running its whole length, is the flat-topped office block in pale travertine with continuous horizontal ribbon windows. The long side wings along the tracks are flat-roofed travertine blocks with regular windows. Every station roof is FLAT (pale grey concrete or terrace), never terracotta tiles, never hipped or pitched. The curved, pale, arcaded block standing alone in the garden north-west of the station front is NOT a building: it is the Servian Wall, a ruined ancient wall of large weathered grey-brown tufa blocks, with no windows, no glass, no roof and no plaster, its top ragged and grassy. The piazza in front is a wide paved pedestrian square: keep only the lanes, garden, trees and paths the input draws; add no bus bays, shelters or vehicles that are not in it. Follow the exact footprints.",
+
+    },
     { name: "Villa Borghese", lat: 41.914411, lon: 12.484844, minPx: 0.08, groundMsl: 49 },
     {
       // OSM way 134400816 (area:highway=steps) centroid

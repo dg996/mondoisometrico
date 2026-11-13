@@ -16,7 +16,7 @@ import { CAMERA, ecefToEnu, enuToPixel, llhToEcef } from "./camera.ts";
 import { osmSolid, hasCompleteParts, type BuildingDetail, type SceneBuilding } from "./building-shape.ts";
 import { SEA_H } from "./heights.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
-import { AURELIAN_WALLS, insideRing, romanFallbackHeight, romanLook } from "./roma-style.ts";
+import { AURELIAN_WALLS, BIG_STATION_M2, insideRing, romanFallbackHeight, romanLook } from "./roma-style.ts";
 import type { CtrnUnit } from "./ctrn.ts";
 import polygonClipping from "polygon-clipping";
 
@@ -258,6 +258,9 @@ const monumentRings: P2[][] = ROMA ? osm.elements.filter((el:any)=>{
   const t = el.tags ?? {};
   return t.building && (landmarkHeight(t) || t.amenity === "place_of_worship" || ["church","cathedral","basilica","chapel","temple"].includes(t.building));
 }).flatMap((el:any)=>outerRings(el).map(c=>ringFromLonLat(c)).filter(Boolean)) as P2[][] : [];
+// Rome: parts inside a large station (Termini's 10-storey office block) take the station's flat-roofed look.
+const stationRings: P2[][] = ROMA ? (osm.elements.filter((el:any)=>el.tags?.building === "train_station")
+  .flatMap((el:any)=>outerRings(el).map(c=>ringFromLonLat(c)).filter(Boolean)) as P2[][]).filter((r)=>Math.abs(area2(r)) >= BIG_STATION_M2) : [];
 /** OSM materials -> colours (building:colour / roof:colour still win). */
 const WALL_MATERIAL: Record<string,string> = { brick:"#a85f42", concrete:"#b3aea4", stone:"#d9cfba", marble:"#eeebe4", plaster:"", travertine:"#ddd3bc" };
 const ROOF_MATERIAL: Record<string,string> = { concrete:"#a4a29c", lead:"#8f9190", metal:"#8c9094", copper:"#6f9a8a", roof_tiles:"#a8674c", tiles:"#a8674c", stone:"#cfc6b2", glass:"#9fb3bd" };
@@ -380,7 +383,9 @@ for (const el of osm.elements) {
     }
     const historic = ROMA && insideRing(c, WALLS);
     const inMonument = isPart && monumentRings.some((r) => insideRing(c, r));
-    const look = ROMA ? romanLook(t, historic, !!lh || isFountain || isMonument || inMonument, hash(el.id * 7 + part), hash(el.id * 13 + part + 1)) : null;
+    const station = isPart && !t.building ? stationRings.find((r) => insideRing(c, r)) : undefined;
+    const look = ROMA ? romanLook(station ? { ...t, building: "train_station" } : t, historic, !!lh || isFountain || isMonument || inMonument,
+      hash(el.id * 7 + part), hash(el.id * 13 + part + 1), Math.abs(area2(station ?? ring))) : null;
     // CTRN: rebuild the footprint from surveyed volumes (not landmarks with their own OSM 3D parts)
     const ctrn = ctrnUnits.length && look && !isPart && !lh && !isFountain && !isMonument ? unitsIn(ring, holes) : null;
     if (ctrn && ctrn.cover >= 0.5) {

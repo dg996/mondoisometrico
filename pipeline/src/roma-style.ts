@@ -83,23 +83,30 @@ export interface RomanLook {
   floor: number;
 }
 
+/** Station buildings at least this large (m², one outer ring) are flat-roofed halls and wings. */
+export const BIG_STATION_M2 = 5000;
+
 /**
  * Roman look of an OSM building. `historic` = inside the Aurelian walls. `u` is a stable per-building
  * random number in [0, 1) so colours vary from building to building but never between renders.
  */
-export function romanLook(t: Record<string, string>, historic: boolean, landmark: boolean, u: number, u2: number): RomanLook {
+export function romanLook(t: Record<string, string>, historic: boolean, landmark: boolean, u: number, u2: number, footprintM2 = 0): RomanLook {
   if (["shed", "garage", "garages", "kiosk", "roof", "carport", "hut"].includes(t.building))
     return { style: ROMA_STYLE.shed, wallColor: "#c9c0b0", roofColor: "#a8a196", roof: 0, floor: 3 };
   const worship = WORSHIP.includes(t.building) || t.amenity === "place_of_worship";
   // modern buildings (built 1950+, tagged modern/contemporary, or a verified modern landmark): white
   // travertine and glass, flat roofs — not Roman plaster (Ara Pacis museum, MAXXI, Auditorium)
   const year = parseInt(t.start_date ?? t["building:start_date"] ?? "", 10);
-  if (!worship && (year >= 1950 || /modern|contemporary/i.test(t["building:architecture"] ?? "") || MODERN_NAMES.test(t.name ?? "")))
+  // large station buildings are flat-roofed halls and wings (Termini's 1950 front and Mazzoni wings, Ostiense,
+  // Tiburtina), not palazzi under coppi; small stations keep the city look and a tagged roof:shape still wins
+  const bigStation = t.building === "train_station" && footprintM2 >= BIG_STATION_M2;
+  if (!worship && (bigStation || year >= 1950 || /modern|contemporary/i.test(t["building:architecture"] ?? "") || MODERN_NAMES.test(t.name ?? "")))
     return { style: ROMA_STYLE.palazzina, wallColor: "#ebe8e0", roofColor: "#d6d2c8", roof: 0, floor: 3.4 };
   // medieval towers and tower houses are brick (Torre delle Milizie, Torre dei Conti, Torre del Papito)
   if (t.historic === "tower" || t.historic === "tower_house" || t.man_made === "tower" && t.historic)
     return { style: ROMA_STYLE.travertino, wallColor: "#a96a45", roofColor: "#8e5a40", roof: 0, floor: 4 };
-  if (landmark || worship || STONE.includes(t.historic))
+  // ancient Roman remains (Servian Wall at Termini: historic=yes) are stone, never a plastered palazzo
+  if (landmark || worship || STONE.includes(t.historic) || t["historic:civilization"] === "ancient_roman")
     // churches: coppi over the nave; monuments (Colosseo, arches, mausolea): stone tops, not roof tiles
     return { style: ROMA_STYLE.travertino, wallColor: TRAVERTINO, roofColor: worship ? TRAVERTINO_ROOF : "#cbbfa6", roof: worship ? 3.5 : 0, floor: 4.5 };
   if (historic)
