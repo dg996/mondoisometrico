@@ -841,11 +841,7 @@ export class Traffic {
     items.sort((a, b) => b.depth - a.depth); // back to front
     this.drawn = items.length;
     for (const { v, c, d, a } of items) {
-      const hl = v.len / 2, z = v.bus ? 1 : 0.7;
-      const [fx, fy] = proj([c[0] + d[0] * hl, c[1] + d[1] * hl, c[2] + z]), [rx, ry] = proj([c[0] - d[0] * hl, c[1] - d[1] * hl, c[2] + z]);
-      const [ax, ay] = proj([c[0] + d[0] * (hl + 1), c[1] + d[1] * (hl + 1), c[2] + z]);
-      const mpp = Math.hypot(ax - fx, ay - fy) || 1;
-      this.lit.push({ fx, fy, rx, ry, ux: (ax - fx) / mpp, uy: (ay - fy) / mpp, a, bus: v.bus, mpp });
+      this.lit.push({ e: c[0], n: c[1], u: c[2], de: d[0], dn: d[1], len: v.len, wid: v.wid, a, bus: v.bus });
     }
     for (const { v, c, d, a } of items) {
       this.fadeA = a;

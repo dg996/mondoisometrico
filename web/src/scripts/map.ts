@@ -271,6 +271,7 @@ function frame(t: number) {
     trams.step(dt);
     trams.draw(ctx, toScreen, px, [0, 0, w, hgt]);
   }
+  if (lights) lights.drawPosts(ctx, toScreen, w, hgt, ambient.night()); // lamp posts, under the night tint
   if (traffic && showTraffic && px >= 0.28) {
     traffic.step(dt);
     traffic.draw(ctx, toScreen, px, [0, 0, w, hgt]);
@@ -292,7 +293,7 @@ function frame(t: number) {
     lctx.beginPath();
     for (const [x0, y0, x1, y1] of activity.rects) lctx.rect(x0 * k + tx, y0 * k + ty, (x1 - x0) * k, (y1 - y0) * k);
     lctx.clip();
-    lights.draw(lctx, toScreen, px, w, hgt, night, traffic && showTraffic ? traffic.lit : []);
+    lights.draw(lctx, toScreen, w, hgt, night, traffic && showTraffic ? traffic.lit : []);
     lctx.restore();
   }
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview
