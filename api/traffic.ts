@@ -27,18 +27,22 @@ for (let x = tileX(BBOX[1]); x <= tileX(BBOX[3]); x++) for (let y = tileY(BBOX[2
 
 let cache: { at: number; body: string } | null = null;
 let inflight: Promise<string | null> | null = null;
+/** last failed refresh: no new attempt for RETRY_S (a bad key or an outage never burns the quota) */
+let failedAt = 0;
+const RETRY_S = 300;
 const spent = { day: "", tiles: 0 };
 
 export default {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "GET") return new Response(null, { status: 405 });
-    const key = process.env.TOMTOM_API_KEY;
+    // pasted keys often carry a space, a newline or quotes
+    const key = (process.env.TOMTOM_API_KEY ?? "").trim().replace(/^["']|["']$/g, "");
     if (!key) return json({ error: "not-configured" }, 503, 60);
     const now = Date.now();
-    if (!cache || now - cache.at > REFRESH_S * 1000) {
+    if ((!cache || now - cache.at > REFRESH_S * 1000) && now - failedAt > RETRY_S * 1000) {
       inflight ??= refresh(key).finally(() => { inflight = null; });
       const body = await inflight;
-      if (body) cache = { at: Date.now(), body };
+      if (body) cache = { at: Date.now(), body }; else failedAt = Date.now();
     }
     if (!cache) return json({ error: "unavailable" }, 503, 60);
     const age = Math.round((Date.now() - cache.at) / 1000);
