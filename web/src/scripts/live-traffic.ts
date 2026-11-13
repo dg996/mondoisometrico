@@ -109,9 +109,19 @@ export class LiveTraffic {
       const css = lv === 0 ? CLOSED : CLASSES.find((c) => lv < c.max)!.css; // 0 only for a reported closure
       const path = paths.get(css) ?? paths.set(css, new Path2D()).get(css)!;
       const S = r.s, n = S.length / 4;
-      // only where the street is in view, and stopping a sample (≈2 m) short of any cover: the band
-      // never reaches onto a roof or a crown
-      const seen = (k: number) => k < 0 || k >= n || S[k * 4 + 3] === 1;
+      // drawn where the street is in view, and continuous across short covers (≤ 30 m: a row of tree
+      // crowns over the kerb, a building corner), so a lungotevere under its plane trees is one line,
+      // not dashes; behind a block (a longer cover) it stops a sample (≈2 m) short of it
+      const ok = new Uint8Array(n);
+      for (let k = 0; k < n; k++) ok[k] = S[k * 4 + 3] === 1 ? 1 : 0;
+      for (let k = 0; k < n;) {
+        if (ok[k]) { k++; continue; }
+        let j = k, run = 0;
+        while (j < n && !ok[j]) { if (j > 0) run += Math.hypot(S[j * 4] - S[(j - 1) * 4], S[j * 4 + 1] - S[(j - 1) * 4 + 1]); j++; }
+        if (k > 0 && j < n && run <= 30) for (let q = k; q < j; q++) ok[q] = 2;
+        k = j;
+      }
+      const seen = (k: number) => k < 0 || k >= n || ok[k] > 0;
       let open = false;
       for (let k = 0; k < n; k++) {
         if (!seen(k) || !seen(k - 1) || !seen(k + 1)) { open = false; continue; }

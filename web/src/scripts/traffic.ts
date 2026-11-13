@@ -1154,10 +1154,13 @@ export class Traffic {
       // fade in after appearing, fade out over the last metres before a dead end / painted-area cut
       const born = v.born === undefined ? 1 : (this.t - v.born) / FADE_IN;
       let leaving = v.next ? 1 : (way.len - (v.s + v.len / 2)) / FADE_OUT_M;
-      if (v.next) { // the next way is a short dead end (after the hop the body would already be at its end)
+      if (v.next) { // the next way is short and leads nowhere for this vehicle (a dead end, or where its
+        // bus line leaves the drawn graph): after the hop the body would already be at its end, so fade now
         const nw = this.ways[v.next.w], nEnd = v.next.dir === 1 ? nw.r.b : nw.r.a;
-        if (nw.len < v.len + FADE_OUT_M * 2 && !(this.out.get(nEnd) ?? []).some((o) => o.w !== v.next!.w))
-          leaving = Math.max(0, way.len - (v.s + v.len / 2) + nw.len - v.len) / FADE_OUT_M;
+        if (nw.len < v.len + FADE_OUT_M * 2) {
+          const onward = v.line >= 0 ? this.lineNext(nEnd, v.next.w, v.line) !== null : (this.out.get(nEnd) ?? []).some((o) => o.w !== v.next!.w);
+          if (!onward) leaving = Math.max(0, way.len - (v.s + v.len / 2) + nw.len - v.len) / FADE_OUT_M;
+        }
       }
       const going = v.gone === undefined ? 1 : 1 - (this.t - v.gone) / 0.8;
       const alpha = Math.max(0, Math.min(1, born, leaving, clear, going));
