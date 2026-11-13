@@ -48,6 +48,9 @@ const text = (v: unknown) => (Array.isArray(v) ? v.join(" ") : String(v ?? ""));
 
 for (const region of regions) {
   const root = join(WEB_CACHE, "regions", region);
+  // what is already on R2 (data/web-state/<region>.json, written by publish): data name -> content hash
+  const stateFile = join(WEB_CACHE, "..", "web-state", `${region}.json`);
+  const published: Record<string, string> = existsSync(stateFile) ? (JSON.parse(readFileSync(stateFile, "utf8")).data ?? {}) : {};
   const worldFile = join(root, "data", "world.json");
   const fail = (msg: string): never => {
     throw new Error(`publish guard (${region}): ${msg}. Fix the export first; publish/deploy stay blocked.`);
@@ -82,7 +85,10 @@ for (const region of regions) {
   for (const name of ["tiles-map", "tiles-photo", "borders", "roads"] as const) {
     const file: string = typeof world.files?.[name] === "string" ? (world.files[name] as string) : fail(`world.files.${name} is missing`);
     if (!file.endsWith(".json")) fail(`world.files.${name} is missing`);
-    if (!existsSync(join(root, "data", file))) fail(`world.files.${name} names ${file}, absent from the local cache`);
+    // export writes only changed files; an unchanged one is already on R2 under the same content hash
+    const hash = file.match(/\.([0-9a-f]{10})\.json$/)?.[1];
+    if (!existsSync(join(root, "data", file)) && !(hash && published[name] === hash))
+      fail(`world.files.${name} names ${file}, absent from the local cache and not the published version`);
   }
   const credits = `${text(world.credits)} ${text(world.attributions)}`;
   if (!credits.includes("OpenStreetMap")) fail("OpenStreetMap credit is missing from world credits/attributions");
