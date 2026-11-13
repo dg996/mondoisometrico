@@ -433,16 +433,22 @@ async function findWorksites(ways: Array<{ c: number; w: number; y: number; brid
       if (edgeDistance(x, y) < EDGE1) continue; // that edge is the clouds, not a work site (edgeDistance tops out near EDGE1 + EDGE0 / 2)
       const dx = w.s[k + 4] - w.s[k - 4], dy = w.s[k + 5] - w.s[k - 3], L = Math.hypot(dx, dy);
       if (!L) continue;
+      // the whole site must be open street: every point of its footprint (6.5 m back to 9 m ahead
+      // along the street, the carriageway across) visible on the height pass up to the height of the
+      // drawn figures (4.5 m: they are drawn 2.5 x life size), so no worker, cone or sign ever
+      // stands on or behind a building
       let ok = true;
-      for (const off of [-w.w / 2, 0, w.w / 2]) {
-        const q: [number, number, number] = [e + (dy / L) * off, n - (dx / L) * off, u];
-        if (w.waterAt(q[0], q[1])) { ok = false; break; }
-        for (const lift of [0, 1.6, 3.2]) {
-          const [qx, qy] = enuToPixel([q[0], q[1], q[2] + lift]);
-          await heights.ensure(qx, qy);
-          if (!roadSurfaceSafe(heights.at(qx, qy), enuHeight([q[0], q[1], q[2] + lift]), lift === 0)) { ok = false; break; }
+      const ux = dx / L, uy = dy / L;
+      for (let a = -6.5; a <= 9 && ok; a += 1.5) {
+        for (let b = -w.w / 2 + 0.5; b <= w.w / 2 - 0.5 + 1e-6 && ok; b += 1) {
+          const q: [number, number, number] = [e + ux * a + uy * b, n + uy * a - ux * b, u];
+          if (w.waterAt(q[0], q[1])) { ok = false; break; }
+          for (const lift of [0, 1.5, 3, 4.5]) {
+            const [qx, qy] = enuToPixel([q[0], q[1], q[2] + lift]);
+            await heights.ensure(qx, qy);
+            if (!roadSurfaceSafe(heights.at(qx, qy), enuHeight([q[0], q[1], q[2] + lift]), lift === 0)) { ok = false; break; }
+          }
         }
-        if (!ok) break;
       }
       if (!ok) continue;
       const cell = `${Math.floor(x / CELL)}_${Math.floor(y / CELL)}`, score = w.w - Math.abs(d / FEATHER - 0.35) * 10;
