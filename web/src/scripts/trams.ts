@@ -184,7 +184,7 @@ export class Trams {
     if (px < 0.28 || !this.running()) return;
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] => toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
-    const items: Array<{ cars: Array<{ c: Vec3; d: [number, number] }>; depth: number; line: number }> = [];
+    const items: Array<{ cars: Array<{ c: Vec3; d: [number, number] }>; depth: number; line: number; a: number }> = [];
     for (const tr of this.trams) {
       const track = this.tracks[tr.t], cars = [];
       for (let k = 0; k < CARS; k++) {
@@ -195,11 +195,15 @@ export class Trams {
       if (!cars.length) continue;
       const [sx, sy] = proj(cars[1].c);
       if (sx < view[0] - 80 || sy < view[1] - 80 || sx > view[2] + 80 || sy > view[3] + 80) continue;
-      items.push({ cars, depth: cars[1].c[0] * this.camFwd[0] + cars[1].c[1] * this.camFwd[1], line: track.line });
+      // fade in once the whole tram is on the visible track, fade out before it leaves it (no popping)
+      const a = Math.max(0, Math.min(1, (tr.s - LENGTH) / 8, (track.len - tr.s) / 8));
+      if (a < 0.02) continue;
+      items.push({ cars, depth: cars[1].c[0] * this.camFwd[0] + cars[1].c[1] * this.camFwd[1], line: track.line, a });
     }
     items.sort((a, b) => b.depth - a.depth);
     this.drawn = items.length;
     for (const it of items) {
+      this.fa = it.a; ctx.globalAlpha = it.a;
       // cars[0] leads: windscreen only at the front of the first car and the back of the last
       const ends = it.cars.map((_, k) => (k === 0 ? 2 : 0) | (k === it.cars.length - 1 ? 1 : 0));
       for (let k = 0; k + 1 < it.cars.length; k++) { // bellows first, the cars cover their ends
@@ -214,11 +218,15 @@ export class Trams {
         ctx.font = `700 ${Math.round(Math.min(14, 6 + px * 3))}px ui-sans-serif, system-ui, sans-serif`;
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
         const w = ctx.measureText(label).width + 6;
-        ctx.globalAlpha = 0.9; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
-        ctx.globalAlpha = 1; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
+        ctx.globalAlpha = 0.9 * it.a; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
+        ctx.globalAlpha = it.a; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
       }
     }
+    this.fa = 1; ctx.globalAlpha = 1;
   }
+
+  /** opacity of the tram being drawn */
+  private fa = 1;
 
   /** one tram car: the cab cars carry the raked nose (the rear cab is turned round), middle cars square */
   private car(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [number, number], c: Vec3, d: [number, number], ends = 0) {
@@ -226,9 +234,9 @@ export class Trams {
     const [ax, ay] = proj(c), [bx, by] = proj([c[0] + d[0], c[1] + d[1], c[2]]), pxPerM = Math.hypot(bx - ax, by - ay);
     const r: [number, number] = [d[1], -d[0]], hl = CAR / 2, hw = WIDTH / 2;
     const pt = (a: number, b: number): [number, number] => proj([c[0] + d[0] * a + r[0] * b + 0.4, c[1] + d[1] * a + r[1] * b + 0.3, c[2] + 0.05]);
-    ctx.globalAlpha = 0.2; ctx.fillStyle = "#000"; ctx.beginPath();
+    ctx.globalAlpha = 0.2 * this.fa; ctx.fillStyle = "#000"; ctx.beginPath();
     [pt(hl, hw), pt(-hl, hw), pt(-hl, -hw), pt(hl, -hw)].forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.closePath(); ctx.fill(); ctx.globalAlpha = this.fa;
     const cab = ends & 2 ? 1 : ends & 1 ? -1 : 0, dir: [number, number] = cab === -1 ? [-d[0], -d[1]] : d;
     drawCar(ctx, proj, c, dir, cab ? "tram-cab" : "tram", CAR, WIDTH, HEIGHT, BODY, view, SUN, pxPerM);
     if (pxPerM < 3) return;
