@@ -45,6 +45,10 @@ interface Vehicle {
   off?: boolean;
   /** lateral offset it had on the previous way: eased into the new lane over the first metres */
   lat0?: number;
+  /** sim time it (re)appeared on the map: fades in instead of popping up */
+  born?: number;
+  /** drawn heading, eased toward the road's so the body turns smoothly through bends and junctions */
+  hd?: [number, number];
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -69,6 +73,10 @@ function carType(r: () => number): { kind: "car" | "small" | "taxi" | "van"; len
 /** ATAC fleet: mostly red, some white/grey (illustrative livery, not per vehicle) */
 const ATAC_COLORS: Array<[number, number, number]> = [[178, 34, 42], [178, 34, 42], [178, 34, 42], [222, 222, 220]];
 const GUIDE_CELL = 25, OFF_ROUTE = 16, BUS_SPEED = 6; // m, m, m/s average incl. stops
+/** lane width (m): lanes are laid out from the centre line, so wide roads keep traffic off the kerb */
+const LANE_W = 3.4;
+/** fade-in after (re)appearing (s) and fade-out over the last metres before leaving the drawn graph */
+const FADE_IN = 0.7, FADE_OUT_M = 5;
 
 export class Traffic {
   private ways: Way[] = [];
@@ -108,7 +116,11 @@ export class Traffic {
       const cum = new Float32Array(n);
       for (let i = 1; i < n; i++)
         cum[i] = cum[i - 1] + Math.hypot(r.s[i * 4] - r.s[i * 4 - 4], r.s[i * 4 + 1] - r.s[i * 4 - 3]);
-      const w = this.ways.push({ r, n, cum, len: cum[n - 1], w: r.w ?? Math.max(4, r.l * (r.o ? 3.2 : 6.4)) }) - 1;
+      const ww = r.w ?? Math.max(4, r.l * (r.o ? 3.2 : 6.4));
+      // OSM often has no lanes tag on wide Roman avenues: one lane each way on a 20 m road sends
+      // everything into one file along the kerb. Infer the lanes the drawn asphalt holds.
+      if (r.c <= 4) r.l = Math.max(1, r.l, Math.min(4, Math.floor((r.o ? ww : ww / 2) / LANE_W)));
+      const w = this.ways.push({ r, n, cum, len: cum[n - 1], w: ww }) - 1;
       const R = Math.min(16, (r.w ?? 6) / 2 + 1.5);
       for (const n of [r.a, r.b]) {
         this.nodeR.set(n, Math.max(this.nodeR.get(n) ?? 0, R));
@@ -169,6 +181,7 @@ export class Traffic {
           : type.kind === "taxi" || type.kind === "van" ? [238, 238, 236] : CAR_COLORS[Math.floor(this.rand() * CAR_COLORS.length)],
       };
       v.v = this.limit(v) * 0.8;
+      v.born = -FADE_IN; // already there when the map opens
       this.vehicles.push(v);
       group.push(v);
       this.lanes.set(`${w}:${dir}:${lane}`, group);
@@ -270,6 +283,7 @@ export class Traffic {
   private reenterLine(v: Vehicle) {
     this.release(v);
     v.off = !this.placeOnLine(v.line, 0, v, 0.01) && !this.placeOnLine(v.line, this.rand(), v);
+    v.born = this.t; v.hd = undefined; v.lat0 = undefined; // put back on its line: fades in there
   }
 
   /** Does this line run at the simulated hour? Night lines (n…) 0:30–5:30, the others 5:30–24:30. */
@@ -738,7 +752,7 @@ export class Traffic {
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       if (!this.spotFree(w, dir, start, v.len, v)) continue;
-      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined });
+      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined });
       this.insertLane(v);
       return;
     }
@@ -749,8 +763,9 @@ export class Traffic {
   private offset(way: Way, v: Vehicle) {
     const r = way.r, half = way.w / 2;
     const lanes = Math.max(1, r.l);
-    const lw = r.o === 0 ? half / lanes : way.w / lanes;
-    const o = half - (v.lane + 0.5) * lw;
+    const lw = Math.min(LANE_W, r.o === 0 ? half / lanes : way.w / lanes);
+    // lane 0 is the right-most (buses, slow traffic); lanes stack from the centre line outwards
+    const o = r.o === 0 ? (lanes - 0.5 - v.lane) * lw : (lanes / 2 - 0.5 - v.lane) * lw;
     const lane = Math.max(-half + v.wid / 2 + 0.2, Math.min(half - v.wid / 2 - 0.2, o));
     // a new way's lane can sit 1–2 m aside from the last one: drift over, don't jump
     const into = v.s - v.len / 2;
@@ -767,7 +782,7 @@ export class Traffic {
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] =>
       toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
-    const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; depth: number }> = [];
+    const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; a: number; depth: number }> = [];
     for (const v of this.vehicles) {
       const way = this.ways[v.w], S = way.r.s;
       const at = (dist: number) => { // sample index at distance along the travel direction
@@ -788,19 +803,33 @@ export class Traffic {
       if (du > 2.2) continue;
       const off = this.offset(way, v);
       const c: Vec3 = [S[k0] + (S[k1] - S[k0]) * f + dy * off, S[k0 + 1] + (S[k1 + 1] - S[k0 + 1]) * f - dx * off, S[k0 + 2] + (S[k1 + 2] - S[k0 + 2]) * f];
-      // Reject cars sitting in a river trough vs this way's bank approaches
+      // Reject cars sitting in a river trough: well below the straight grade between the way's two
+      // ends (a plain slope — most of Rome is on hills — is not a trough)
       const band = Math.max(1, Math.floor(way.n * 0.2));
-      let bank = -Infinity;
-      for (let j = 0; j < band; j++) bank = Math.max(bank, S[j * 4 + 2]);
-      for (let j = way.n - band; j < way.n; j++) bank = Math.max(bank, S[j * 4 + 2]);
-      if (Number.isFinite(bank) && c[2] < bank - 2.2) continue;
+      let z0 = -Infinity, z1 = -Infinity;
+      for (let j = 0; j < band; j++) z0 = Math.max(z0, S[j * 4 + 2]);
+      for (let j = way.n - band; j < way.n; j++) z1 = Math.max(z1, S[j * 4 + 2]);
+      const grade = z0 + (z1 - z0) * (s / Math.max(1e-3, way.len));
+      if (Number.isFinite(grade) && c[2] < grade - 2.2) continue;
+      // fade in after appearing, fade out over the last metres before a dead end / painted-area cut
+      const born = v.born === undefined ? 1 : (this.t - v.born) / FADE_IN;
+      const leaving = v.next ? 1 : (way.len - (v.s + v.len / 2)) / FADE_OUT_M;
+      const alpha = Math.max(0, Math.min(1, born, leaving));
+      if (alpha < 0.02) continue;
+      // the body turns smoothly: eased toward the road's direction (snaps only on a reversal)
+      if (v.hd && v.hd[0] * dx + v.hd[1] * dy > -0.2) {
+        const hx = v.hd[0] + (dx - v.hd[0]) * 0.22, hy = v.hd[1] + (dy - v.hd[1]) * 0.22, hl = Math.hypot(hx, hy) || 1;
+        v.hd = [hx / hl, hy / hl];
+      } else v.hd = [dx, dy];
       const [sx, sy] = proj(c);
       if (sx < vx0 - 40 || sy < vy0 - 40 || sx > vx1 + 40 || sy > vy1 + 40) continue;
-      items.push({ v, c, d: [dx, dy], depth: c[0] * this.camFwd[0] + c[1] * this.camFwd[1] });
+      items.push({ v, c, d: v.hd, a: alpha, depth: c[0] * this.camFwd[0] + c[1] * this.camFwd[1] });
     }
     items.sort((a, b) => b.depth - a.depth); // back to front
     this.drawn = items.length;
-    for (const { v, c, d } of items) {
+    for (const { v, c, d, a } of items) {
+      this.fadeA = a;
+      ctx.globalAlpha = a;
       this.box(ctx, proj, c, d, v);
       // line number on the roof once a bus is big enough to read
       if (v.line >= 0 && px >= 1.1) {
@@ -809,11 +838,16 @@ export class Traffic {
         ctx.font = `700 ${Math.round(Math.min(14, 6 + px * 3))}px ui-sans-serif, system-ui, sans-serif`;
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
         const w = ctx.measureText(label).width + 6;
-        ctx.globalAlpha = 0.9; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
-        ctx.globalAlpha = 1; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
+        ctx.globalAlpha = 0.9 * a; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
+        ctx.globalAlpha = a; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
       }
     }
+    this.fadeA = 1;
+    ctx.globalAlpha = 1;
   }
+
+  /** opacity of the vehicle being drawn (fades); every fill multiplies by it */
+  private fadeA = 1;
 
   /**
    * One vehicle as a small isometric illustration: contact shadow, dark outline round the whole
@@ -828,7 +862,8 @@ export class Traffic {
     const kind = v.bus ? "bus" : v.kind;
     const hl = v.len / 2, hw = v.wid / 2, G = 0.08;
     const path = (pts: Vec3[]) => { ctx.beginPath(); pts.forEach((p, i) => { const [x, y] = scr(p); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); };
-    const fill = (pts: Vec3[], css: string, a = 1) => { ctx.globalAlpha = a; ctx.fillStyle = css; path(pts); ctx.fill(); ctx.globalAlpha = 1; };
+    const fa = this.fadeA;
+    const fill = (pts: Vec3[], css: string, a = 1) => { ctx.globalAlpha = a * fa; ctx.fillStyle = css; path(pts); ctx.fill(); ctx.globalAlpha = fa; };
     const shade = (rgb: [number, number, number], n: Vec3) => {
       const k = 0.62 + 0.42 * Math.max(0, n[0] * SUN[0] + n[1] * SUN[1] + n[2] * SUN[2]);
       return `rgb(${Math.min(255, rgb[0] * k) | 0},${Math.min(255, rgb[1] * k) | 0},${Math.min(255, rgb[2] * k) | 0})`;
@@ -931,9 +966,9 @@ export class Traffic {
     }
     fill(roofP, shade(v.color, [0, 0, 1]));
     // highlight streak on the windscreen + bonnet line
-    ctx.globalAlpha = 0.35; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = Math.max(0.6, px * 0.05);
+    ctx.globalAlpha = 0.35 * fa; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = Math.max(0.6, px * 0.05);
     ctx.beginPath(); { const [x1, y1] = scr(pt(cabF, hw * 0.5, zBelt + 0.15)), [x2, y2] = scr(pt(cabF - 0.3, -hw * 0.2, zRoof - 0.1)); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); } ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = fa;
     // lamps
     fill([pt(nose + 0.01, hw * 0.75, zBelt - 0.25), pt(nose + 0.01, hw * 0.35, zBelt - 0.25), pt(nose + 0.01, hw * 0.35, zBelt - 0.08), pt(nose + 0.01, hw * 0.75, zBelt - 0.08)], "rgb(250,246,226)", 0.95);
     fill([pt(nose + 0.01, -hw * 0.75, zBelt - 0.25), pt(nose + 0.01, -hw * 0.35, zBelt - 0.25), pt(nose + 0.01, -hw * 0.35, zBelt - 0.08), pt(nose + 0.01, -hw * 0.75, zBelt - 0.08)], "rgb(250,246,226)", 0.95);
@@ -952,9 +987,9 @@ export class Traffic {
       const side = hw; // signed: the camera-facing side
       const c = pt(a, side * 1.01, radius), [x, y] = scr(c), [x2, y2] = scr(pt(a + radius, side * 1.01, radius));
       const rad = Math.max(1, Math.hypot(x2 - x, y2 - y));
-      ctx.globalAlpha = 0.95; ctx.fillStyle = "#18191c";
+      ctx.globalAlpha = 0.95 * this.fadeA; ctx.fillStyle = "#18191c";
       ctx.beginPath(); ctx.ellipse(x, y, rad, rad * 0.75, Math.atan2(y2 - y, x2 - x), 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = this.fadeA;
     }
   }
 }
