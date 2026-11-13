@@ -408,12 +408,19 @@ export class Traffic {
       if (way.len - b < Math.max(this.nodeR.get(this.endNode(v)) ?? 0, this.zebraR.get(`${v.w}:${v.dir}:in`) ?? 0)) return null; // the stop line handles it
       let rear = Infinity, speed = 0;
       if (lead) { rear = lead.s - lead.len / 2; speed = lead.v; }
-      else if (v.next && v.through) {
-        const nl = v.bus ? 0 : Math.min(v.lane, this.ways[v.next.w].r.l - 1), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
-        if (first) { rear = way.len + first.s - first.len / 2; speed = first.v; }
+      else if (v.next) {
+        // a short link into a junction: its stop line may be only metres past the stripes, and
+        // without a green the vehicle would have to wait on them
+        const nw = this.ways[v.next.w], nend = v.next.dir === 1 ? nw.r.b : nw.r.a;
+        if (this.controlled(nend) && v.holding !== this.groupOf(nend)) {
+          const zone = Math.max(this.nodeR.get(nend) ?? 4, this.mergeR.get(`${v.next.w}:${v.next.dir}:in`) ?? 0, this.zebraR.get(`${v.next.w}:${v.next.dir}:in`) ?? 0);
+          rear = way.len + Math.max(0, nw.len - zone);
+        }
+        const nl = v.bus ? 0 : Math.min(v.lane, nw.r.l - 1), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
+        if (first && way.len + first.s - first.len / 2 < rear) { rear = way.len + first.s - first.len / 2; speed = first.v; }
       }
-      // room for the whole body past the stripes, counting on a leader that is moving away
-      if (rear + Math.min(speed, 6) * 1.5 - b < v.len + GAP) return a - front;
+      // room for the whole body past the stripes, counting a little on a leader that is moving away
+      if (rear + Math.min(speed, 6) * 0.8 - b < v.len + GAP) return a - front;
       return null;
     }
     return null;
