@@ -13,7 +13,7 @@ const SUN: Vec3 = (() => { const v = [-0.55, -0.35, 0.76], L = Math.hypot(...v);
 type Vec3 = [number, number, number];
 export interface TramMeta { n: string; d: number; h: number; /** stops, flat [e, n, e, n …] */ st?: number[] }
 interface Track { r: Road; n: number; cum: Float32Array; len: number; line: number }
-interface Tram { id: number; t: number; s: number; v: number; dwell: number; lastStop: number }
+interface Tram { id: number; t: number; s: number; v: number; dwell: number; lastStop: number; /** s held up by a vehicle */ cw?: number }
 
 const SPEED = 7, CAR = 11.2, GAP_CARS = 0.45, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
 /** a car fades out over the last metres before a stretch hidden in the view, back in after it */
@@ -32,6 +32,8 @@ export class Trams {
   /** vehicle bodies in ENU [ax, ay, bx, by, half width] (map.ts wires traffic.ts in): a tram brakes
    *  for a car standing on its track */
   obstacles: (() => number[][]) | null = null;
+  /** a vehicle (index into obstacles()) has held a tram up for long: make it give way */
+  onCarBlock: ((index: number) => void) | null = null;
   /** tram car bodies for the cars, [ax, ay, bx, by, half width] */
   footprints(): number[][] {
     if (!this.running()) return [];
@@ -84,6 +86,8 @@ export class Trams {
   }
 
   get count() { return this.trams.length; }
+  /** the tracks (ENU samples), for traffic.ts to keep cars off the lanes lying on them */
+  get trackRoads(): Road[] { return this.tracks.map((t) => t.r); }
 
   /** conflict zones between every pair of tracks: centre lines closer than 2.2 m (a crossing or a
    *  shared stretch; the two directions of a line run ~3.5 m apart and never conflict), grown 3 m */
@@ -143,18 +147,21 @@ export class Trams {
       return pts;
     });
     const cars = this.obstacles?.() ?? [];
-    const carGrid = new Map<string, number[][]>();
-    for (const c of cars) { const k = `${Math.floor((c[0] + c[2]) / 40)}_${Math.floor((c[1] + c[3]) / 40)}`; (carGrid.get(k) ?? carGrid.set(k, []).get(k)!).push(c); }
+    const carGrid = new Map<string, number[]>(); // cell -> indices into cars
+    cars.forEach((c, i) => { const k = `${Math.floor((c[0] + c[2]) / 40)}_${Math.floor((c[1] + c[3]) / 40)}`; (carGrid.get(k) ?? carGrid.set(k, []).get(k)!).push(i); });
+    /** index of a vehicle within the tram's swept path at this track point (−1 none): the body width
+     *  plus what the cars sweep inside a curve (their chord cuts in by up to ~1 m) */
     const carAt = (x: number, y: number) => {
       const cx = Math.floor(x / 20), cy = Math.floor(y / 20);
-      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const c of carGrid.get(`${cx + i}_${cy + j}`) ?? []) {
-        const sx = c[2] - c[0], sy = c[3] - c[1], SL = sx * sx + sy * sy || 1, t = Math.max(0, Math.min(1, ((x - c[0]) * sx + (y - c[1]) * sy) / SL));
-        if (Math.hypot(x - c[0] - sx * t, y - c[1] - sy * t) < c[4] + WIDTH / 2 + 0.2) return true;
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const ci of carGrid.get(`${cx + i}_${cy + j}`) ?? []) {
+        const c = cars[ci], sx = c[2] - c[0], sy = c[3] - c[1], SL = sx * sx + sy * sy || 1, t = Math.max(0, Math.min(1, ((x - c[0]) * sx + (y - c[1]) * sy) / SL));
+        if (Math.hypot(x - c[0] - sx * t, y - c[1] - sy * t) < c[4] + WIDTH / 2 + 1.3) return ci;
       }
-      return false;
+      return -1;
     };
     for (const tr of this.trams) {
       const track = this.tracks[tr.t];
+      let blocker = -1;
       // free distance ahead: walk the track in 2 m steps until another tram's body is within 3 m
       let free = SAFE + 40;
       for (let o = 2; o <= SAFE + 40; o += 2) {
@@ -165,7 +172,7 @@ export class Trams {
           if (k === tr.id) continue;
           for (const [bx, by] of bodies[k]) if (Math.hypot(bx - x, by - y) < 2.4) { hit = true; break; } // oncoming trams pass at ~3.5 m
         }
-        if (!hit && cars.length && carAt(x, y)) hit = true; // a car on the track: brake for it
+        if (!hit && cars.length) { const ci = carAt(x, y); if (ci >= 0) { hit = true; blocker = ci; } } // a car in the way: brake for it
         if (hit) { free = o; break; }
       }
       // conflict zones ahead: claim the zone early enough to stop before it; without the claim, stop short
@@ -191,6 +198,9 @@ export class Trams {
         if (stop - tr.s < 0.6) { tr.s = stop; tr.v = 0; tr.dwell = DWELL; tr.lastStop = stop; continue; }
       }
       tr.v = target > tr.v ? Math.min(target, tr.v + ACCEL * dt) : Math.max(target, tr.v - BRAKE * 2 * dt);
+      // held up by a vehicle that does not move off (parked in a queue across the swept path): after
+      // 8 s it gives way (traffic.ts fades it out and brings it back elsewhere)
+      if (blocker >= 0 && tr.v < 0.3) { tr.cw = (tr.cw ?? 0) + dt; if (tr.cw > 8) { this.onCarBlock?.(blocker); tr.cw = 0; } } else tr.cw = 0;
       tr.s += tr.v * dt;
       if (tr.s > track.len) { // leaves the visible stretch: re-enters at its start once that is clear
         const [sx, sy] = this.pos(track, 0);

@@ -53,6 +53,8 @@ interface Vehicle {
   hdT?: number;
   /** sim time it started fading out to leave a gridlock (moved elsewhere once faded) */
   gone?: number;
+  /** seconds waiting for a tram (a deadlock with one is broken after 12 s) */
+  tw?: number;
   /** drawn cover opacity, eased toward the geometric clearance (no pop at a way change), and when */
   ca?: number; caT?: number;
 }
@@ -188,7 +190,7 @@ export class Traffic {
       const s = lo + this.rand() * (hi - lo);
       if (this.onZebra(w, dir, s, len)) continue; // nobody parks on the stripes
       if (!this.sampleVisible(way, s, dir, len)) continue; // exact spawn point must be on visible asphalt
-      const lane = bus ? 0 : Math.floor(this.rand() * way.r.l);
+      const lane = bus ? 0 : this.pickLane(w, dir, Math.floor(this.rand() * way.r.l), type.wid);
       // never spawn on top of another vehicle
       const group = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
       if (group.some((o) => Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
@@ -499,7 +501,7 @@ export class Traffic {
       const lo = v.len / 2 + Math.max(this.nodeR.get(dir === 1 ? way.r.a : way.r.b) ?? 0, 4);
       const hi = way.len - v.len / 2 - Math.max(this.nodeR.get(dir === 1 ? way.r.b : way.r.a) ?? 0, 4);
       if (hi <= lo) continue;
-      const s = lo + this.rand() * (hi - lo), lane = Math.floor(this.rand() * Math.max(1, way.r.l));
+      const s = lo + this.rand() * (hi - lo), lane = this.pickLane(w, dir, Math.floor(this.rand() * Math.max(1, way.r.l)), v.wid);
       if (this.onZebra(w, dir, s, v.len)) continue;
       const g = this.lanes.get(`${w}:${dir}:${lane}`) ?? [];
       if (g.some((o) => Math.abs(o.s - s) < (o.len + v.len) / 2 + 2 * GAP)) continue;
@@ -551,7 +553,7 @@ export class Traffic {
 
   /** Free space beyond the junction box at the start of `next`, in the lane we would enter. */
   private entryClear(v: Vehicle, next: { w: number; dir: 1 | -1 }) {
-    const lane = v.bus ? 0 : Math.min(v.lane, this.ways[next.w].r.l - 1);
+    const lane = v.bus ? 0 : this.pickLane(next.w, next.dir, Math.min(v.lane, this.ways[next.w].r.l - 1), v.wid);
     const g = this.lanes.get(`${next.w}:${next.dir}:${lane}`);
     const clear = Math.max(this.nodeR.get(this.endNode(v)) ?? 4, this.zebraR.get(`${next.w}:${next.dir}:out`) ?? 0);
     return !g?.length || g[0].s - g[0].len / 2 > clear + v.len + GAP;
@@ -787,6 +789,8 @@ export class Traffic {
 
   /** vehicle of each entry of `feet` */
   private feetOf: Vehicle[] = [];
+  /** trams.ts: the vehicle of feet[i] has held a tram up for long: it fades out and comes back elsewhere */
+  giveWay(i: number) { const v = this.feetOf[i]; if (v && v.gone === undefined) v.gone = this.t; }
 
   /** Vehicles whose nose (or a front corner) would touch a tram body (bodies from blockedAhead). */
   private blockedByTrams() {
@@ -830,7 +834,7 @@ export class Traffic {
           target = Math.min(target, Math.max(0, gap / HEADWAY), lead.v + Math.max(0, gap) * 0.5);
         } else if (v.next) {
           // last in its lane: follow the last vehicle already on the next way (no lane change there)
-          const nl = v.bus ? 0 : Math.min(v.lane, this.ways[v.next.w].r.l - 1), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
+          const nl = v.bus ? 0 : this.pickLane(v.next.w, v.next.dir, Math.min(v.lane, this.ways[v.next.w].r.l - 1), v.wid), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
           if (first) {
             const path = way.len - (v.s + v.len / 2) + first.s - first.len / 2 - GAP - 0.25 * Math.max(v.len, first.len); // ways meet at an angle: straight bodies need room
             // and through a hairpin the two bodies end up side by side: keep a straight-line gap too
@@ -866,7 +870,11 @@ export class Traffic {
           if (way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 5 + Math.max(0, toStop) * 0.3);
         } else if (v.through && way.r.c >= 2 && this.isJunction(this.endNode(v))) target = Math.min(target, 7);
         if (blocked.has(v)) { target = 0; if (v.v < 0.5) v.stuck += dt; } // two noses in each other's way: the escape below sorts it out
-        if (tramBlocked.has(v)) { target = 0; v.v = Math.min(v.v, 1); } // a tram in the way: wait until it has passed
+        if (tramBlocked.has(v)) { // a tram in the way: stop short of it, wait until it has passed
+          target = 0; v.v = 0; v.tw = (v.tw ?? 0) + dt;
+          // a car whose nose is on the tracks and a tram waiting for it would wait for ever: the car gives way
+          if (v.tw > 12 && v.gone === undefined) v.gone = this.t;
+        } else v.tw = 0;
         // left the crossing behind (this way leads out of it and the rear has cleared the box): release it
         if (v.holding >= 0) {
           const start = v.dir === 1 ? way.r.a : way.r.b;
@@ -900,7 +908,7 @@ export class Traffic {
       }
       if (!v.through) { v.s = way.len - v.len / 2; v.v = 0; continue; } // not granted: hold at the end
       const over = v.s + v.len / 2 - way.len, nw = this.ways[v.next.w], lat = this.offset(way, v);
-      const lane = v.bus ? 0 : Math.min(v.lane, nw.r.l - 1), ns = Math.min(nw.len - v.len / 2, v.len / 2 + over);
+      const lane = v.bus ? 0 : this.pickLane(v.next.w, v.next.dir, Math.min(v.lane, nw.r.l - 1), v.wid), ns = Math.min(nw.len - v.len / 2, v.len / 2 + over);
       // something was put at the start of that lane during this step: wait at the line instead
       if ((this.lanes.get(`${v.next.w}:${v.next.dir}:${lane}`) ?? []).some((o) => o !== v && Math.abs(o.s - ns) < (o.len + v.len) / 2 + 0.5)) {
         v.s = way.len - v.len / 2; v.v = 0; continue;
@@ -911,6 +919,7 @@ export class Traffic {
       v.s = ns;
       v.phase += 0.7;
       this.insertLane(v);
+      v.next = this.chooseNext(v); // chosen now: drawn this frame with its way out (no one-frame "dead end" fade)
     }
   }
 
@@ -940,21 +949,132 @@ export class Traffic {
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       if (!this.spotFree(w, dir, start, v.len, v)) continue;
-      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined, gone: undefined });
+      Object.assign(v, { w, dir, lane: v.bus ? 0 : this.pickLane(w, dir, 0, v.wid), s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined, gone: undefined });
       this.insertLane(v);
       return;
     }
     v.off = true; // no free entry now: wait out of sight and try again
   }
 
-  /** Lateral offset (m, + = right of travel) of the lane centre, kept inside the drawn asphalt. */
-  private offset(way: Way, v: Vehicle) {
+  /** Lateral offset (m, + = right of travel) of a lane's centre for a body of width `wid`. */
+  private laneCentre(way: Way, laneIdx: number, wid: number) {
     const r = way.r, half = way.w / 2;
     const lanes = Math.max(1, r.l);
     const lw = Math.min(LANE_W, r.o === 0 ? half / lanes : way.w / lanes);
     // lane 0 is the right-most (buses, slow traffic); lanes stack from the centre line outwards
-    const o = r.o === 0 ? (lanes - 0.5 - v.lane) * lw : (lanes / 2 - 0.5 - v.lane) * lw;
-    const lane = Math.max(-half + v.wid / 2 + 0.2, Math.min(half - v.wid / 2 - 0.2, o));
+    const o = r.o === 0 ? (lanes - 0.5 - laneIdx) * lw : (lanes / 2 - 0.5 - laneIdx) * lw;
+    return Math.max(-half + wid / 2 + 0.2, Math.min(half - wid / 2 - 0.2, o));
+  }
+
+  /** per way: lateral offsets (m, + = right of the way's own direction) of tram tracks along it */
+  private tracksOn = new Map<number, number[]>();
+
+  /** Tram tracks (trams.ts): the lanes lying on them are left to the trams (cars take the others;
+   *  only where every lane is on the tracks do cars share them, queueing behind the tram). */
+  setTramTracks(tracks: Road[]) {
+    const CELL = 10, grid = new Map<string, number[]>();
+    for (const t of tracks) {
+      const S = t.s, n = S.length / 4;
+      for (let k = 1; k < n; k++) {
+        const dx = S[k * 4] - S[(k - 1) * 4], dy = S[k * 4 + 1] - S[(k - 1) * 4 + 1], L = Math.hypot(dx, dy);
+        if (L < 0.01) continue;
+        const key = `${Math.floor(S[k * 4] / CELL)}_${Math.floor(S[k * 4 + 1] / CELL)}`;
+        (grid.get(key) ?? grid.set(key, []).get(key)!).push(S[k * 4], S[k * 4 + 1], dx / L, dy / L);
+      }
+    }
+    this.tracksOn.clear();
+    // junctions the tracks pass through: the stop line and the box reach past the whole tram corridor
+    // (a tram 2.4 m wide on either track), so a car waiting to cross never has its nose in a tram's path
+    const nodePos = new Map<number, [number, number]>();
+    for (const way of this.ways) { const S = way.r.s; nodePos.set(way.r.a, [S[0], S[1]]); nodePos.set(way.r.b, [S[(way.n - 1) * 4], S[(way.n - 1) * 4 + 1]]); }
+    for (const [node, [x, y]] of nodePos) {
+      if ((this.degree.get(node) ?? 0) < 3) continue;
+      let best = Infinity;
+      const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+        const g = grid.get(`${cx + i}_${cy + j}`);
+        if (g) for (let q = 0; q < g.length; q += 4) best = Math.min(best, Math.hypot(g[q] - x, g[q + 1] - y));
+      }
+      if (best < 6) this.nodeR.set(node, Math.max(this.nodeR.get(node) ?? 0, best + 1.2 + 2.2 + 2.5));
+    }
+    this.ways.forEach((way, w) => {
+      const S = way.r.s, reach = way.w / 2 + 1.5, votes = new Map<number, number>();
+      let tried = 0;
+      for (let k = 1; k < way.n; k += 2) {
+        const dx = S[k * 4] - S[(k - 1) * 4], dy = S[k * 4 + 1] - S[(k - 1) * 4 + 1], L = Math.hypot(dx, dy);
+        if (L < 0.01) continue;
+        tried++;
+        const ux = dx / L, uy = dy / L, x = S[k * 4], y = S[k * 4 + 1], cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+        const here = new Set<number>();
+        for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+          const g = grid.get(`${cx + i}_${cy + j}`);
+          if (!g) continue;
+          for (let q = 0; q < g.length; q += 4) {
+            if (Math.abs(g[q + 2] * ux + g[q + 3] * uy) < 0.85) continue; // a crossing track
+            const rx = g[q] - x, ry = g[q + 1] - y;
+            if (Math.abs(rx * ux + ry * uy) > 3) continue;
+            const lat = rx * uy - ry * ux; // + = right of the way's direction
+            if (Math.abs(lat) <= reach) here.add(Math.round(lat * 2) / 2);
+          }
+        }
+        for (const l of here) votes.set(l, (votes.get(l) ?? 0) + 1);
+      }
+      if (!tried) return;
+      const offs = [...votes].filter(([, c]) => c >= tried * 0.35).map(([l]) => l);
+      if (offs.length) this.tracksOn.set(w, offs);
+    });
+    // where a street crosses the tracks, the tram's swept path is kept clear like a zebra crossing:
+    // a car crosses only when there is room past it, never queues on the tracks
+    const segs = new Map<string, number[]>();
+    for (const t of tracks) {
+      const S = t.s, n = S.length / 4;
+      for (let k = 1; k < n; k++) {
+        const key = `${Math.floor(S[k * 4] / CELL)}_${Math.floor(S[k * 4 + 1] / CELL)}`;
+        (segs.get(key) ?? segs.set(key, []).get(key)!).push(S[(k - 1) * 4], S[(k - 1) * 4 + 1], S[k * 4], S[k * 4 + 1]);
+      }
+    }
+    let added = 0;
+    this.ways.forEach((way) => {
+      const S = way.r.s, found: Array<[number, number]> = [];
+      for (let i = 1; i < way.n; i++) {
+        const ax = S[(i - 1) * 4], ay = S[(i - 1) * 4 + 1], bx = S[i * 4], by = S[i * 4 + 1], wx = bx - ax, wy = by - ay, wl = Math.hypot(wx, wy);
+        if (wl < 0.01) continue;
+        const cx = Math.floor(bx / CELL), cy = Math.floor(by / CELL);
+        for (let gi = -1; gi <= 1; gi++) for (let gj = -1; gj <= 1; gj++) {
+          const g = segs.get(`${cx + gi}_${cy + gj}`);
+          if (g) for (let q = 0; q < g.length; q += 4) {
+            const tx = g[q + 2] - g[q], ty = g[q + 3] - g[q + 1], den = wx * ty - wy * tx;
+            if (Math.abs(den) < 1e-9) continue;
+            const u = ((g[q] - ax) * ty - (g[q + 1] - ay) * tx) / den, v2 = ((g[q] - ax) * wy - (g[q + 1] - ay) * wx) / den;
+            if (u < 0 || u > 1 || v2 < 0 || v2 > 1) continue;
+            const sin = Math.abs(den) / (wl * Math.hypot(tx, ty));
+            if (sin < 0.4) continue; // running along the tracks, not across: the lanes handle that
+            const d = way.cum[i - 1] + u * wl;
+            if (found.some(([e]) => Math.abs(e - d) < 2)) continue;
+            found.push([d, Math.min(12, (1.2 + 1.3 + 1.0) / sin)]);
+          }
+        }
+      }
+      if (!found.length) return;
+      way.r.x = [...(way.r.x ?? []), ...found.flat()];
+      added += found.length;
+    });
+    if (added) { this.zebraR.clear(); this.zebraLines(); }
+  }
+
+  /** the lane nearest to `want` whose body stays clear of the tram tracks on this way */
+  private pickLane(w: number, dir: 1 | -1, want: number, wid: number) {
+    const offs = this.tracksOn.get(w), way = this.ways[w], lanes = Math.max(1, way.r.l);
+    want = Math.max(0, Math.min(lanes - 1, want));
+    if (!offs) return want;
+    const clear = (i: number) => { const o = this.laneCentre(way, i, wid); return offs.every((t) => Math.abs(o - (dir === 1 ? t : -t)) >= wid / 2 + 1.2 + 0.25); };
+    for (let d = 0; d < lanes; d++) for (const i of [want - d, want + d]) if (i >= 0 && i < lanes && clear(i)) return i;
+    return want; // every lane is on the tracks: shared with the trams
+  }
+
+  /** Lateral offset (m, + = right of travel) of the lane centre, kept inside the drawn asphalt. */
+  private offset(way: Way, v: Vehicle) {
+    const lane = this.laneCentre(way, v.lane, v.wid);
     // a new way's lane can sit 1–2 m aside from the last one: drift over, don't jump
     const into = v.s - v.len / 2;
     if (v.lat0 === undefined || into >= 10) return lane;
@@ -972,6 +1092,20 @@ export class Traffic {
     const proj = (p: Vec3): [number, number] =>
       toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
     this.onScreen = (p) => { const [x, y] = proj(p); return x > vx0 - 80 && y > vy0 - 80 && x < vx1 + 80 && y < vy1 + 80; };
+    // tram bodies this frame: a vehicle whose body runs into one is behind the tram (never drawn through it)
+    const tramSegs = this.obstacles?.() ?? [];
+    const underTram = (c: Vec3, d: [number, number], len: number, wid: number) => {
+      for (const sg of tramSegs) {
+        if (Math.abs(sg[0] - c[0]) > 30 || Math.abs(sg[1] - c[1]) > 30) continue;
+        const sx = sg[2] - sg[0], sy = sg[3] - sg[1], SL = sx * sx + sy * sy || 1;
+        for (let q = -1; q <= 1; q += 0.5) {
+          const x = c[0] + d[0] * (len / 2) * q, y = c[1] + d[1] * (len / 2) * q;
+          const t = Math.max(0, Math.min(1, ((x - sg[0]) * sx + (y - sg[1]) * sy) / SL));
+          if (Math.hypot(x - sg[0] - sx * t, y - sg[1] - sy * t) < sg[4] + wid / 2 - 0.15) return true;
+        }
+      }
+      return false;
+    };
     if (this.t - this.nearT > 1) this.findNear(proj, view);
     const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; a: number; depth: number }> = [];
     for (const v of this.vehicles) {
@@ -1038,6 +1172,7 @@ export class Traffic {
       } else v.hd = [dx, dy];
       const [sx, sy] = proj(c);
       if (sx < vx0 - 40 || sy < vy0 - 40 || sx > vx1 + 40 || sy > vy1 + 40) continue;
+      if (tramSegs.length && underTram(c, v.hd, v.len, v.wid)) continue;
       items.push({ v, c, d: v.hd, a: alpha, depth: c[0] * this.camFwd[0] + c[1] * this.camFwd[1] });
     }
     items.sort((a, b) => b.depth - a.depth); // back to front

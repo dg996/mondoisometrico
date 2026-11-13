@@ -185,7 +185,7 @@ function loadAnimations() {
       trams.clock = () => ambient.minutes();
     }
     // cars and trams see each other: neither drives into the other
-    if (traffic && trams) { const tf = traffic, tm = trams; tf.obstacles = () => tm.footprints(); tm.obstacles = () => tf.feet; }
+    if (traffic && trams) { const tf = traffic, tm = trams; tf.obstacles = () => tm.footprints(); tm.obstacles = () => tf.feet; tm.onCarBlock = (i) => tf.giveWay(i); tf.setTramTracks(tm.trackRoads); }
     if (roads.length) cats = new Cats(roads, world.enu2px);
     // lamps on every street of the painted area, also the lanes hidden behind roofs (their glow shows)
     if (roads.length) lights = new Lights(allRoads, world.enu2px, (x, y) => !world.activity || activity.containsRect(x, y));
