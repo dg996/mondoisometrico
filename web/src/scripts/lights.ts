@@ -1,7 +1,6 @@
 /**
  * The city at night, drawn on #lights (screen-blended over the night tint, so it adds light and never
- * hides the painting): street lamps along the drawn roads, headlights and tail lights of the traffic,
- * floodlit monuments.
+ * hides the painting): street lamps along the drawn roads, headlights and tail lights of the traffic.
  *
  * Street lamps: no open dataset maps Rome's ~205,000 lighting points (Areti / ACEA; the city's
  * regulator ACOS reports ~3.6 points per 100 m of street, almost all LED since the 2016–17 LED plan,
@@ -40,7 +39,6 @@ export class Lights {
   private lamps: Float32Array;
   private pool = sprite([255, 178, 96]);   // 3000 K pool of light on the asphalt
   private head = sprite([255, 236, 200], 32); // the lantern itself
-  private flood = sprite([255, 205, 140], 128, true); // monument floodlight
   private beam = sprite([255, 240, 215], 32);
   private tail = sprite([255, 60, 40], 32);
   /** art px per metre on the ground (iso scale) */
@@ -78,28 +76,16 @@ export class Lights {
   get count() { return this.lamps.length / 5; }
 
   /**
-   * `night` 0..1, `px` canvas px per art px, landmarks = floodlit anchors (art px, radius m),
-   * cars = headlight / tail-light positions already in canvas px.
+   * `night` 0..1, `px` canvas px per art px, cars = headlight / tail-light positions already in canvas px.
    */
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, w: number, h: number, night: number,
-       landmarks: Array<[number, number, number]>, cars: CarLight[]) {
+       cars: CarLight[]) {
     ctx.clearRect(0, 0, w, h);
     if (night < 0.02) return;
     const dpr = window.devicePixelRatio || 1;
     const m = this.ppm * px * dpr; // canvas (device) px per metre: the same look on retina screens
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    // floodlit monuments: a warm wash rising from the base
-    for (const [x, y, r] of landmarks) {
-      const [sx, sy] = toScreen(x, y), R = r * m * 1.5;
-      if (R < 14 * dpr) continue; // too far out to read as a lit monument: just a smudge
-      if (sx < -R || sy < -R || sx > w + R || sy > h + R) continue;
-      // two wide, flat washes: the whole monument lit evenly, no hot spot
-      ctx.globalAlpha = 0.34 * night;
-      ctx.drawImage(this.flood, sx - R * 1.15, sy - R, 2.3 * R, 1.7 * R);
-      ctx.globalAlpha = 0.2 * night;
-      ctx.drawImage(this.flood, sx - R * 0.8, sy - R * 0.7, 1.6 * R, 1.2 * R);
-    }
     // street lamps: pool on the asphalt (iso ellipse) + the lantern, sized in metres so they sit
     // in the painting at every zoom; zoomed far out they merge into the lit street network
     const L = this.lamps, poolR = Math.max(2.4 * dpr, 15 * m), headR = Math.max(1 * dpr, Math.min(8 * dpr, 2.2 * m));

@@ -288,17 +288,11 @@ function frame(t: number) {
   if (lights && lctx && lightsCanvas) { // the city lit at night, over the night tint
     if (lightsCanvas.width !== w || lightsCanvas.height !== hgt) { lightsCanvas.width = w; lightsCanvas.height = hgt; }
     const night = ambient.night();
-    const flood: Array<[number, number, number]> = [];
-    if (night > 0.02) for (const lm of LANDMARKS[document.body.dataset.city!] ?? []) {
-      const [gx, gy] = world.landmarks?.[lm.name] ?? landmarkPixel(lm);
-      if (world.activity && !activity.containsRect(gx, gy)) continue;
-      flood.push([gx, gy, Math.min(lm.paintRadiusM ?? 25, 80) * 0.7]);
-    }
     lctx.save();
     lctx.beginPath();
     for (const [x0, y0, x1, y1] of activity.rects) lctx.rect(x0 * k + tx, y0 * k + ty, (x1 - x0) * k, (y1 - y0) * k);
     lctx.clip();
-    lights.draw(lctx, toScreen, px, w, hgt, night, flood, traffic && showTraffic ? traffic.lit : []);
+    lights.draw(lctx, toScreen, px, w, hgt, night, traffic && showTraffic ? traffic.lit : []);
     lctx.restore();
   }
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview

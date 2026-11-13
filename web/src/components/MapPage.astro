@@ -87,7 +87,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<!-- light of the hour and weather over the tiles (ambient.ts): multiply tint + soft wash, never repainting -->
 		<div id="ambient-tint" aria-hidden="true"></div>
 		<div id="ambient-wash" aria-hidden="true"></div>
-		<!-- street lamps, headlights, floodlit monuments over the night tint (lights.ts) -->
+		<!-- street lamps and headlights over the night tint (lights.ts) -->
 		<canvas id="lights" aria-hidden="true"></canvas>
 		<div id="ambient" class="ui" role="group" aria-label="Ora e meteo">
 			<div class="row">
@@ -105,7 +105,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			</div>
 			<div id="help" hidden>
 				<p>Roma disegnata da open data e dipinta con AI. Le zone dipinte crescono a ogni aggiornamento; fuori, la città resta sfocata tra le nuvole.</p>
-				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Luce e meteo seguono l'ora e il tempo reali di Roma; con Giorno, Pomeriggio e Notte scegli tu la luce. Di notte la città si accende: lampioni lungo le strade (circa 3,6 ogni 100 m, la densità della rete di Roma), fari delle auto e monumenti illuminati.</p>
+				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Luce e meteo seguono l'ora e il tempo reali di Roma; con Giorno, Pomeriggio e Notte scegli tu la luce. Di notte la città si accende: lampioni lungo le strade (circa 3,6 ogni 100 m, la densità della rete di Roma) e fari delle auto.</p>
 				<p class="keys"><b>H</b> nascondi comandi · <b>T</b> traffico · <b>P</b> foto/dipinto · <b>B</b> confini · <b>V</b> modalità video</p>
 				<button type="button" id="feedback-open" aria-haspopup="dialog" aria-controls="feedback">Segnala un problema o un'idea</button>
 			</div>
