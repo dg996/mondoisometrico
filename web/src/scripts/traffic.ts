@@ -257,8 +257,12 @@ export class Traffic {
       }
       if (!pick) continue;
       const len = this.guides[g].line.h <= 480 && (g + Math.floor(f * 10)) % 3 === 0 ? 18 : 12, way = this.ways[pick.w]; // busiest lines: some articulated
-      const s = Math.max(len / 2 + 1, Math.min(way.len - len / 2 - 1, pick.s));
-      if (way.len < len + 4 || !this.sampleVisible(way, s, pick.dir, len)) continue;
+      // never inside a junction box (crossing traffic would drive through it): clear of both ends
+      const from = (this.nodeR.get(pick.dir === 1 ? way.r.a : way.r.b) ?? 0) + len / 2 + 1;
+      const to = way.len - (this.nodeR.get(pick.dir === 1 ? way.r.b : way.r.a) ?? 0) - len / 2 - 1;
+      if (to < from) continue;
+      const s = Math.max(from, Math.min(to, pick.s));
+      if (!this.sampleVisible(way, s, pick.dir, len)) continue;
       const lane = 0, group = this.lanes.get(`${pick.w}:${pick.dir}:${lane}`) ?? [];
       if (group.some((o) => o !== existing && Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
       if (!this.spotFree(pick.w, pick.dir, s, len, existing)) continue;
