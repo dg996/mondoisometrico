@@ -7,12 +7,23 @@
     "deploymentEnabled": true
   },
   "rewrites": [
-    { "source": "/p/:route", "destination": "/api/p?route=:route" }
+    {
+      "source": "/p/:route",
+      "destination": "/api/p?route=:route"
+    }
   ],
   "headers": [
     {
       "source": "/_astro/(.*)",
-      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
     }
+  ],
+  "regions": [
+    "fra1"
   ]
 }

@@ -15,18 +15,22 @@ export interface TramMeta { n: string; d: number; h: number; /** stops, flat [e,
 interface Track { r: Road; n: number; cum: Float32Array; len: number; line: number }
 interface Tram { id: number; t: number; s: number; v: number; dwell: number; lastStop: number }
 
-const SPEED = 7, CAR = 11.2, GAP_CARS = 0.6, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
+const SPEED = 7, CAR = 11.2, GAP_CARS = 0.45, CARS = 3, WIDTH = 2.4, HEIGHT = 3.35;
+/** a car fades out over the last metres before a stretch hidden in the view, back in after it */
+const COVER_FADE_M = 4;
 const ACCEL = 1.1, BRAKE = 1.8;            // m/s² (low-floor tram)
 const LENGTH = CARS * CAR + (CARS - 1) * GAP_CARS;
 const SAFE = 12;                            // m kept free in front of a tram's nose
 const DWELL = 18;                           // s at a stop
-const BODY: [number, number, number] = [228, 226, 220];
+const BODY: [number, number, number] = [236, 235, 230];
 
 export class Trams {
   private tracks: Track[] = [];
   private trams: Tram[] = [];
   clock: () => number = () => 12 * 60;
   drawn = 0;
+  /** head / tail lights of the trams drawn in the last frame (lights.ts) */
+  lit: import("./lights.ts").CarLight[] = [];
 
   /** stop positions (distance along each track), from the GTFS stops of the line */
   private stops: number[][] = [];
@@ -167,32 +171,42 @@ export class Trams {
     }
   }
 
-  /** point and direction on a track at distance s */
-  private at(track: Track, s: number): { c: Vec3; d: [number, number] } | null {
+  /** point and direction of a car centred at distance s, and how clear its body is of any stretch
+   *  hidden in the view (0 = touching it … 1 = COVER_FADE_M away): the car fades, never pops */
+  private at(track: Track, s: number): { c: Vec3; d: [number, number]; clear: number } | null {
     if (s < 0 || s > track.len) return null;
     const S = track.r.s;
     let i = 1;
     while (i < track.n - 1 && track.cum[i] < s) i++;
-    if (!S[(i - 1) * 4 + 3] || !S[i * 4 + 3]) return null;
     const f = (s - track.cum[i - 1]) / Math.max(1e-3, track.cum[i] - track.cum[i - 1]);
     const dx = S[i * 4] - S[i * 4 - 4], dy = S[i * 4 + 1] - S[i * 4 - 3], L = Math.hypot(dx, dy) || 1;
-    return { c: [S[i * 4 - 4] + dx * f, S[i * 4 - 3] + dy * f, S[i * 4 - 2] + (S[i * 4 + 2] - S[i * 4 - 2]) * f], d: [dx / L, dy / L] };
+    const lo = s - CAR / 2, hi = s + CAR / 2;
+    let near = COVER_FADE_M;
+    for (let k = 1; k < track.n && near > 0; k++) {
+      const a = track.cum[k - 1], b = track.cum[k];
+      if (b < lo - COVER_FADE_M) continue;
+      if (a > hi + COVER_FADE_M) break;
+      if (S[(k - 1) * 4 + 3] === 1 && S[k * 4 + 3] === 1) continue;
+      near = Math.min(near, Math.max(0, a - hi, lo - b));
+    }
+    return { c: [S[i * 4 - 4] + dx * f, S[i * 4 - 3] + dy * f, S[i * 4 - 2] + (S[i * 4 + 2] - S[i * 4 - 2]) * f], d: [dx / L, dy / L], clear: near / COVER_FADE_M };
   }
 
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
     this.drawn = 0;
+    this.lit = [];
     if (px < 0.28 || !this.running()) return;
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] => toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
-    const items: Array<{ cars: Array<{ c: Vec3; d: [number, number] }>; depth: number; line: number; a: number }> = [];
+    const items: Array<{ cars: Array<{ c: Vec3; d: [number, number]; clear: number }>; depth: number; line: number; a: number }> = [];
     for (const tr of this.trams) {
       const track = this.tracks[tr.t], cars = [];
       for (let k = 0; k < CARS; k++) {
         const p = this.at(track, tr.s - k * (CAR + GAP_CARS) - CAR / 2);
-        if (!p) { cars.length = 0; break; } // the whole tram must be on visible track
+        if (!p) { cars.length = 0; break; } // the whole tram must be on the track
         cars.push(p);
       }
-      if (!cars.length) continue;
+      if (!cars.length || cars.every((p) => p.clear < 0.02)) continue; // all behind buildings
       const [sx, sy] = proj(cars[1].c);
       if (sx < view[0] - 80 || sy < view[1] - 80 || sx > view[2] + 80 || sy > view[3] + 80) continue;
       // fade in once the whole tram is on the visible track, fade out before it leaves it (no popping)
@@ -203,23 +217,36 @@ export class Trams {
     items.sort((a, b) => b.depth - a.depth);
     this.drawn = items.length;
     for (const it of items) {
-      this.fa = it.a; ctx.globalAlpha = it.a;
       // cars[0] leads: windscreen only at the front of the first car and the back of the last
       const ends = it.cars.map((_, k) => (k === 0 ? 2 : 0) | (k === it.cars.length - 1 ? 1 : 0));
       for (let k = 0; k + 1 < it.cars.length; k++) { // bellows first, the cars cover their ends
         const a = it.cars[k], b = it.cars[k + 1];
-        this.bellows(ctx, proj, [(a.c[0] + b.c[0]) / 2, (a.c[1] + b.c[1]) / 2, (a.c[2] + b.c[2]) / 2], a.d);
+        this.fa = it.a * Math.min(a.clear, b.clear); ctx.globalAlpha = this.fa;
+        if (this.fa < 0.02) continue;
+        const m = Math.hypot(b.c[0] - a.c[0], b.c[1] - a.c[1]) || 1;
+        this.bellows(ctx, proj, [(a.c[0] + b.c[0]) / 2, (a.c[1] + b.c[1]) / 2, (a.c[2] + b.c[2]) / 2], [(a.c[0] - b.c[0]) / m, (a.c[1] - b.c[1]) / m]);
       }
-      for (const k of it.cars.map((_, k) => k).sort((a, b) => (it.cars[b].c[0] * this.camFwd[0] + it.cars[b].c[1] * this.camFwd[1]) - (it.cars[a].c[0] * this.camFwd[0] + it.cars[a].c[1] * this.camFwd[1])))
+      for (const k of it.cars.map((_, k) => k).sort((a, b) => (it.cars[b].c[0] * this.camFwd[0] + it.cars[b].c[1] * this.camFwd[1]) - (it.cars[a].c[0] * this.camFwd[0] + it.cars[a].c[1] * this.camFwd[1]))) {
+        this.fa = it.a * it.cars[k].clear; ctx.globalAlpha = this.fa;
+        if (this.fa < 0.02) continue;
         this.car(ctx, proj, it.cars[k].c, it.cars[k].d, ends[k]);
-      if (px >= 1.1) {
-        const [sx, sy] = proj([it.cars[0].c[0], it.cars[0].c[1], it.cars[0].c[2] + HEIGHT + 0.4]);
+      }
+      // night: headlights at the nose of the first car, tail lights at the back of the last
+      const f = it.cars[0], l = it.cars[it.cars.length - 1];
+      this.lit.push({ e: f.c[0], n: f.c[1], u: f.c[2], de: f.d[0], dn: f.d[1], len: CAR, wid: WIDTH, a: it.a * f.clear, bus: true, tails: false });
+      this.lit.push({ e: l.c[0], n: l.c[1], u: l.c[2], de: l.d[0], dn: l.d[1], len: CAR, wid: WIDTH, a: it.a * l.clear, bus: true, heads: false });
+      this.fa = it.a; ctx.globalAlpha = it.a;
+      // line number over the leading car that is in view (not over one hidden behind a building)
+      const shown = it.cars.find((p) => p.clear > 0.5);
+      if (px >= 1.1 && shown) {
+        const la = it.a * shown.clear;
+        const [sx, sy] = proj([shown.c[0], shown.c[1], shown.c[2] + HEIGHT + 0.4]);
         const label = this.meta[it.line].n;
         ctx.font = `700 ${Math.round(Math.min(14, 6 + px * 3))}px ui-sans-serif, system-ui, sans-serif`;
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
         const w = ctx.measureText(label).width + 6;
-        ctx.globalAlpha = 0.9 * it.a; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
-        ctx.globalAlpha = it.a; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
+        ctx.globalAlpha = 0.9 * la; ctx.fillStyle = "#1d1b19"; ctx.fillRect(sx - w / 2, sy - 8, w, 16);
+        ctx.globalAlpha = la; ctx.fillStyle = "#ffd84d"; ctx.fillText(label, sx, sy);
       }
     }
     this.fa = 1; ctx.globalAlpha = 1;
@@ -239,7 +266,17 @@ export class Trams {
     ctx.closePath(); ctx.fill(); ctx.globalAlpha = this.fa;
     const cab = ends & 2 ? 1 : ends & 1 ? -1 : 0, dir: [number, number] = cab === -1 ? [-d[0], -d[1]] : d;
     drawCar(ctx, proj, c, dir, cab ? "tram-cab" : "tram", CAR, WIDTH, HEIGHT, BODY, view, SUN, pxPerM);
-    if (pxPerM < 3) return;
+    if (cab === 1 && pxPerM > 1.4) { // line display over the windscreen: amber LEDs on black
+      const q = (a: number, b: number, z: number) => proj([c[0] + d[0] * a + r[0] * b, c[1] + d[1] * a + r[1] * b, c[2] + z]);
+      const a0 = hl * 0.86, z0 = HEIGHT * 0.83, z1 = HEIGHT * 0.9;
+      ctx.fillStyle = "#121314"; ctx.beginPath();
+      [q(a0, -0.75, z0), q(a0, 0.75, z0), q(a0 - 0.15, 0.75, z1), q(a0 - 0.15, -0.75, z1)].forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#ffb02a"; ctx.beginPath();
+      [q(a0 + 0.01, -0.55, z0 + 0.06), q(a0 + 0.01, 0.55, z0 + 0.06), q(a0 - 0.13, 0.55, z1 - 0.06), q(a0 - 0.13, -0.55, z1 - 0.06)].forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath(); ctx.fill();
+    }
+    if (pxPerM < 1.6) return;
     // roof equipment: an air-conditioning box on every car, the pantograph on the middle one
     const roofAt = (a: number): Vec3 => [c[0] + d[0] * a, c[1] + d[1] * a, c[2] + HEIGHT];
     drawCar(ctx, proj, roofAt(cab === 1 ? -1.2 : cab === -1 ? 1.2 : -2.2), d, "box", 2.4, WIDTH * 0.55, 0.38, [196, 198, 196], view, SUN, pxPerM);

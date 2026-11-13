@@ -51,6 +51,10 @@ interface Vehicle {
   hd?: [number, number];
   /** sim time of the last heading update */
   hdT?: number;
+  /** sim time it started fading out to leave a gridlock (moved elsewhere once faded) */
+  gone?: number;
+  /** drawn cover opacity, eased toward the geometric clearance (no pop at a way change), and when */
+  ca?: number; caT?: number;
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -80,6 +84,11 @@ const LANE_W = 3.4;
 const INFER_LANES = true;
 /** fade-in after (re)appearing (s) and fade-out over the last metres before leaving the drawn graph */
 const FADE_IN = 0.7, FADE_OUT_M = 5;
+/** a body fades out over the last metres before a stretch hidden in the view (behind a building,
+ *  under a tree crown) and back in over the first metres after it */
+const COVER_FADE_M = 4;
+/** a line bus put back on its route needs this much route ahead inside the drawn graph (m) */
+const RUNWAY = 120;
 
 export class Traffic {
   private ways: Way[] = [];
@@ -201,6 +210,12 @@ export class Traffic {
 
   get count() { return this.vehicles.length; }
 
+  /** the roads of the drawn graph, in way order (live-traffic.ts matches TomTom data onto them) */
+  get wayRoads(): Road[] { return this.ways.map((w) => w.r); }
+  /** live relative speed per way (TomTom, 0..1; NaN unknown), or null: free-flow simulation */
+  private cong: Float32Array | null = null;
+  setCongestion(levels: Float32Array | null) { this.cong = levels && levels.length === this.ways.length ? levels : null; }
+
   /** Buses on the real lines: as many per line stretch as its headway allows (≥ 1 when it runs). */
   private spawnLines(lines: BusLine[]) {
     for (const line of lines) {
@@ -265,12 +280,16 @@ export class Traffic {
       if (to < from) continue;
       const s = Math.max(from, Math.min(to, pick.s));
       if (!this.sampleVisible(way, s, pick.dir, len)) continue;
+      // a bus put back on its line: out of the visitor's view, and with a real stretch of route
+      // ahead (never on a short stub where it would vanish again a few metres on)
+      if (existing && step < 0.1 && this.seen(pick.w, pick.dir, s)) continue;
+      if (this.runway(pick.w, pick.dir, s, g) < RUNWAY) continue;
       const lane = 0, group = this.lanes.get(`${pick.w}:${pick.dir}:${lane}`) ?? [];
       if (group.some((o) => o !== existing && Math.abs(o.s - s) < (o.len + len) / 2 + GAP)) continue;
       if (!this.spotFree(pick.w, pick.dir, s, len, existing)) continue;
       if (existing) {
         this.release(existing);
-        Object.assign(existing, { w: pick.w, dir: pick.dir, s, lane, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined });
+        Object.assign(existing, { w: pick.w, dir: pick.dir, s, lane, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, gone: undefined });
         this.insertLane(existing); // later moves in this same step must see it
         return true;
       }
@@ -346,7 +365,9 @@ export class Traffic {
 
   /** Cruising speed right now: class limit × personality × slow drift (traffic waves). */
   private limit(v: Vehicle) {
-    const base = CLASS_SPEED[this.ways[v.w].r.c] * v.cruise * (v.bus ? 0.8 : 1);
+    // live traffic on: the real relative speed of this road (a closure or a jam still creeps along)
+    const live = this.cong ? this.cong[v.w] : NaN;
+    const base = CLASS_SPEED[this.ways[v.w].r.c] * v.cruise * (v.bus ? 0.8 : 1) * (Number.isFinite(live) ? Math.max(0.12, Math.min(1, live)) : 1);
     return base * (0.72 + 0.28 * (0.5 + 0.5 * Math.sin(this.t * 0.11 + v.phase)));
   }
 
@@ -378,27 +399,10 @@ export class Traffic {
   }
 
   private chooseNext(v: Vehicle) {
-    const options = (this.out.get(this.endNode(v)) ?? []).filter((o) => o.w !== v.w);
-    // Never route onto mostly-hidden / river-dipped ways (cars would sit in water or float).
-    const drivable = options.filter((o) => this.wayVisible(this.ways[o.w]) >= 0.55
-      && this.sampleVisible(this.ways[o.w], v.len / 2, o.dir, v.len));
-    if (v.line >= 0) { // real line: the option that stays closest to the route 20 m in
-      const g = this.guides[v.line];
-      let best: { w: number; dir: 1 | -1 } | null = null, bd = OFF_ROUTE;
-      for (const o of drivable) {
-        // the worst distance to the route over the first 80 m: a way that starts on the route and
-        // then bends away from it is not the line's way
-        const way = this.ways[o.w];
-        let d = 0;
-        for (let at = Math.min(10, way.len); at <= Math.min(80, way.len); at += 10) {
-          const [x, y] = this.pointAt(o.w, o.dir, at);
-          d = Math.max(d, this.nearest(g, x, y).d);
-          if (d >= bd) break;
-        }
-        if (d < bd) { bd = d; best = o; }
-      }
-      return best; // null: the line leaves the drawn graph here -> the bus is put back on its line
-    }
+    // every way of the graph is drivable: stretches hidden in the view are short (activity.ts
+    // MAX_HIDDEN) and vehicles pass them unseen (draw fades them by their distance to the cover)
+    const drivable = (this.out.get(this.endNode(v)) ?? []).filter((o) => o.w !== v.w);
+    if (v.line >= 0) return this.lineNext(this.endNode(v), v.w, v.line); // null: the line leaves the drawn graph here -> put back on its line
     const pool = (v.bus ? drivable.filter((o) => this.ways[o.w].r.c <= 3) : drivable);
     const from = pool.length ? pool : drivable;
     if (!from.length) return null;
@@ -406,6 +410,74 @@ export class Traffic {
     let pick = this.rand() * weights.reduce((a, b) => a + b, 0), k = 0;
     while (pick > weights[k] && k < weights.length - 1) pick -= weights[k++];
     return from[k];
+  }
+
+  /** The way out of `node` a real line takes: the one that stays closest to its route over the first
+   *  80 m (a way that starts on the route and then bends away from it is not the line's way). */
+  private lineNext(node: number, fromW: number, line: number) {
+    const g = this.guides[line];
+    let best: { w: number; dir: 1 | -1 } | null = null, bd = OFF_ROUTE;
+    for (const o of this.out.get(node) ?? []) {
+      if (o.w === fromW) continue;
+      const way = this.ways[o.w];
+      let d = 0;
+      for (let at = Math.min(10, way.len); at <= Math.min(80, way.len); at += 10) {
+        const [x, y] = this.pointAt(o.w, o.dir, at);
+        d = Math.max(d, this.nearest(g, x, y).d);
+        if (d >= bd) break;
+      }
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best;
+  }
+
+  /** How far a bus of `line` can drive from here along its route before the drawn graph ends (m). */
+  private runway(w: number, dir: 1 | -1, s: number, line: number, need = RUNWAY) {
+    let left = this.ways[w].len - s, cw = w, cd = dir;
+    for (let hops = 0; left < need && hops < 10; hops++) {
+      const nx = this.lineNext(cd === 1 ? this.ways[cw].r.b : this.ways[cw].r.a, cw, line);
+      if (!nx) break;
+      left += this.ways[nx.w].len; cw = nx.w; cd = nx.dir;
+    }
+    return left;
+  }
+
+  /** Is this point of a way inside the view drawn last (with a margin)? Placements avoid it: nothing
+   *  appears out of thin air in front of the visitor. */
+  private onScreen: ((p: Vec3) => boolean) | null = null;
+  private seen(w: number, dir: 1 | -1, s: number) {
+    if (!this.onScreen) return false;
+    const [x, y] = this.pointAt(w, dir, s);
+    return this.onScreen([x, y, this.ways[w].r.s[2]]);
+  }
+
+  /** distance (m) from the start of a way, in travel direction, to its first hidden sample within
+   *  COVER_FADE_M; null when the start is clear that far */
+  private coverFromStart(way: Way, dir: 1 | -1): number | null {
+    const S = way.r.s;
+    for (let k = 0; k < way.n; k++) {
+      const i = dir === 1 ? k : way.n - 1 - k, d = dir === 1 ? way.cum[i] : way.len - way.cum[i];
+      if (d > COVER_FADE_M) return null;
+      if (S[i * 4 + 3] !== 1) return d;
+    }
+    return null;
+  }
+
+  /** 0..1: how clear the body is of any stretch hidden in the view (1 = at least COVER_FADE_M away). */
+  private clearance(way: Way, dist: number, dir: 1 | -1, length: number) {
+    const center = dir === 1 ? dist : way.len - dist;
+    const lo = center - length / 2, hi = center + length / 2, S = way.r.s;
+    let near = COVER_FADE_M;
+    for (let i = 1; i < way.n; i++) {
+      const a = way.cum[i - 1], b = way.cum[i];
+      if (b < lo - COVER_FADE_M) continue;
+      if (a > hi + COVER_FADE_M) break;
+      if (S[(i - 1) * 4 + 3] === 1 && S[i * 4 + 3] === 1) continue;
+      const d = Math.max(0, a - hi, lo - b);
+      if (d < near) near = d;
+      if (near <= 0) return 0;
+    }
+    return near / COVER_FADE_M;
   }
 
   /** Free space beyond the junction box at the start of `next`, in the lane we would enter. */
@@ -646,7 +718,8 @@ export class Traffic {
         const v = g[k], way = this.ways[v.w];
         if (v.next === null) v.next = this.chooseNext(v);
         let target = this.limit(v);
-        if (v.stuck > 55) { if (v.line >= 0) this.reenterLine(v); else this.respawn(v); continue; } // gridlock escape
+        if (v.stuck > 55 && v.gone === undefined) v.gone = this.t; // gridlock escape: fade out, then move
+        if (v.gone !== undefined && this.t - v.gone > 0.8) { v.gone = undefined; if (v.line >= 0) this.reenterLine(v); else this.respawn(v); continue; }
         // car following: stay a safe gap behind the vehicle ahead in this lane
         const lead = g[k + 1];
         if (lead) {
@@ -758,10 +831,11 @@ export class Traffic {
       if (way.r.c > 3 || way.len < start + v.len + 30 || (v.bus && way.r.c > 2)) continue;
       if (this.wayVisible(way) < 0.55) continue; // no river / occluded respawns
       if (!this.sampleVisible(way, start, dir, v.len)) continue;
+      if (tries < 50 && this.seen(w, dir, start)) continue; // come in out of view, not in front of the visitor
       const g = this.lanes.get(`${w}:${dir}:0`);
       if (g?.some((o) => Math.abs(o.s - start) < v.len + 2 * GAP + o.len)) continue;
       if (!this.spotFree(w, dir, start, v.len, v)) continue;
-      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined });
+      Object.assign(v, { w, dir, lane: 0, s: start, v: 0, next: null, stuck: 0, through: false, off: false, lat0: undefined, born: this.t, hd: undefined, gone: undefined });
       this.insertLane(v);
       return;
     }
@@ -787,11 +861,12 @@ export class Traffic {
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
     this.drawn = 0;
     this.lit = [];
-    if (px < 0.28) return; // only when asphalt is clearly readable — no fleas on roofs at mid zoom
+    if (px < 0.28) { this.onScreen = null; return; } // only when asphalt is clearly readable — no fleas on roofs at mid zoom
     const [vx0, vy0, vx1, vy1] = view;
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] =>
       toScreen(M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2], M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2]);
+    this.onScreen = (p) => { const [x, y] = proj(p); return x > vx0 - 80 && y > vy0 - 80 && x < vx1 + 80 && y < vy1 + 80; };
     const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; a: number; depth: number }> = [];
     for (const v of this.vehicles) {
       const way = this.ways[v.w], S = way.r.s;
@@ -802,7 +877,20 @@ export class Traffic {
         return { i, s };
       };
       if (v.off || (v.line >= 0 && !this.lineRuns(v.line))) continue; // night lines by night, day lines by day
-      if (!this.sampleVisible(way, v.s, v.dir, v.len)) continue;
+      // behind a building / under a crown: fades out approaching the cover, back in after it
+      // cover ahead (also where the next way starts under it): fades out geometrically, never drawn
+      // over the cover; coming out of it (or onto a way from one) fades in over ≈0.25 s
+      let target = this.clearance(way, v.s, v.dir, v.len);
+      const ahead = way.len - (v.s + v.len / 2);
+      if (v.next && target > 0 && ahead < COVER_FADE_M) {
+        const d0 = this.coverFromStart(this.ways[v.next.w], v.next.dir);
+        if (d0 !== null) target = Math.min(target, Math.max(0, ahead + d0) / COVER_FADE_M);
+      }
+      const kc = 1 - Math.exp(-Math.max(0, this.t - (v.caT ?? -1e9)) / 0.1);
+      v.caT = this.t;
+      v.ca = v.ca === undefined || target <= v.ca ? target : v.ca + (target - v.ca) * kc;
+      const clear = v.ca;
+      if (clear < 0.02) continue;
       const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
       const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
       let dx = S[k1] - S[k0], dy = S[k1 + 1] - S[k0 + 1];
@@ -824,7 +912,8 @@ export class Traffic {
       // fade in after appearing, fade out over the last metres before a dead end / painted-area cut
       const born = v.born === undefined ? 1 : (this.t - v.born) / FADE_IN;
       const leaving = v.next ? 1 : (way.len - (v.s + v.len / 2)) / FADE_OUT_M;
-      const alpha = Math.max(0, Math.min(1, born, leaving));
+      const going = v.gone === undefined ? 1 : 1 - (this.t - v.gone) / 0.8;
+      const alpha = Math.max(0, Math.min(1, born, leaving, clear, going));
       if (alpha < 0.02) continue;
       // the body turns smoothly: eased toward the road's direction (snaps only on a reversal)
       // time-based (≈0.15 s), so it behaves the same at any frame rate

@@ -48,7 +48,7 @@ function beamSprite() {
 }
 
 /** headlights / tail lights of one drawn vehicle, in ENU metres (traffic.ts fills them) */
-export interface CarLight { e: number; n: number; u: number; de: number; dn: number; len: number; wid: number; a: number; bus: boolean }
+export interface CarLight { e: number; n: number; u: number; de: number; dn: number; len: number; wid: number; a: number; bus: boolean; heads?: boolean; tails?: boolean }
 
 export class Lights {
   private lamps: Float32Array;
@@ -180,6 +180,7 @@ export class Lights {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     // headlight beams on the asphalt ahead, before the bright points
     for (const c of cars) {
+      if (c.heads === false) continue;
       const Lb = c.bus ? 17 : 14, Wb = 2.6, fe = c.e + c.de * c.len / 2, fn = c.n + c.dn * c.len / 2;
       const [fx, fy] = at(fe, fn, c.u);
       ctx.globalAlpha = 0.55 * night * c.a;
@@ -207,12 +208,16 @@ export class Lights {
       const hw = c.wid / 2 - 0.35, he = c.e + c.de * c.len / 2, hn = c.n + c.dn * c.len / 2, re = c.e - c.de * c.len / 2, rn = c.n - c.dn * c.len / 2;
       const z = c.bus ? 0.9 : 0.65, r = Math.max(0.9 * dpr, 0.24 * m);
       for (const s of [-1, 1]) {
-        const [fx, fy] = at(he - c.dn * hw * s, hn + c.de * hw * s, c.u + z);
-        ctx.globalAlpha = night * c.a;
-        ctx.drawImage(this.core, fx - r, fy - r, 2 * r, 2 * r);
-        const [bx, by] = at(re - c.dn * hw * s, rn + c.de * hw * s, c.u + z);
-        ctx.globalAlpha = 0.85 * night * c.a;
-        ctx.drawImage(this.tail, bx - r * 1.2, by - r * 1.2, 2.4 * r, 2.4 * r);
+        if (c.heads !== false) {
+          const [fx, fy] = at(he - c.dn * hw * s, hn + c.de * hw * s, c.u + z);
+          ctx.globalAlpha = night * c.a;
+          ctx.drawImage(this.core, fx - r, fy - r, 2 * r, 2 * r);
+        }
+        if (c.tails !== false) {
+          const [bx, by] = at(re - c.dn * hw * s, rn + c.de * hw * s, c.u + z);
+          ctx.globalAlpha = 0.85 * night * c.a;
+          ctx.drawImage(this.tail, bx - r * 1.2, by - r * 1.2, 2.4 * r, 2.4 * r);
+        }
       }
     }
     ctx.restore();

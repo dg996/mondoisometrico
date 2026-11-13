@@ -103,9 +103,16 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 				<button type="button" data-mode="pomeriggio" role="radio" aria-checked="false">Pomeriggio</button>
 				<button type="button" data-mode="notte" role="radio" aria-checked="false">Notte</button>
 			</div>
+			<div id="live">
+				<button type="button" id="live-toggle" aria-pressed="false" title="Colora le strade con il traffico reale di Roma (TomTom), aggiornato ogni 10 minuti">Traffico in tempo reale</button>
+				<div id="live-legend" hidden>
+					<span><i style="background:#3a9d48"></i>scorrevole</span><span><i style="background:#f4b400"></i>lento</span><span><i style="background:#ef6c00"></i>rallentato</span><span><i style="background:#c62828"></i>coda</span><span><i style="background:#4a0f0f"></i>chiusa</span>
+					<small id="live-status">…</small>
+				</div>
+			</div>
 			<div id="help" hidden>
 				<p>Roma disegnata da open data e dipinta con AI. Le zone dipinte crescono a ogni aggiornamento; fuori, la città resta sfocata tra le nuvole.</p>
-				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Luce e meteo seguono l'ora e il tempo reali di Roma; con Giorno, Pomeriggio e Notte scegli tu la luce. Di notte la città si accende: lampioni lungo le strade (circa 3,6 ogni 100 m, la densità della rete di Roma) e fari delle auto.</p>
+				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Con "Traffico in tempo reale" le strade si colorano con il traffico vero di Roma (dati © TomTom, ogni 10 minuti) e le auto rallentano dove c'è coda. Luce e meteo seguono l'ora e il tempo reali di Roma; con Giorno, Pomeriggio e Notte scegli tu la luce. Di notte la città si accende: lampioni lungo le strade (circa 3,6 ogni 100 m, la densità della rete di Roma) e fari delle auto.</p>
 				<p class="keys"><b>H</b> nascondi comandi · <b>T</b> traffico · <b>P</b> foto/dipinto · <b>B</b> confini · <b>V</b> modalità video</p>
 				<button type="button" id="feedback-open" aria-haspopup="dialog" aria-controls="feedback">Segnala un problema o un'idea</button>
 			</div>
@@ -179,6 +186,15 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			#daytime { display: flex; gap: 4px; margin-top: 6px; }
 			#ambient #daytime button { flex: 1; padding: 4px 2px; font-size: 12px; }
 			#ambient #daytime button[aria-checked="true"] { background: #3b3630; color: #fff8ec; }
+			#live { margin-top: 6px; }
+			#ambient #live-toggle { display: block; width: 100%; padding: 5px 8px; font-size: 12px; text-align: left; }
+			#ambient #live-toggle::before { content: ""; display: inline-block; width: 26px; height: 14px; margin-right: 8px; vertical-align: -2px; border-radius: 8px;
+				background: rgba(0,0,0,0.18) radial-gradient(circle at 7px 7px, #fff 5px, transparent 5.5px); transition: background 0.2s; }
+			#ambient #live-toggle[aria-pressed="true"]::before { background: #3a9d48 radial-gradient(circle at 19px 7px, #fff 5px, transparent 5.5px); }
+			#live-legend { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 5px; font-size: 11px; color: #4d463e; }
+			#live-legend[hidden] { display: none; }
+			#live-legend i { display: inline-block; width: 12px; height: 4px; border-radius: 2px; margin-right: 4px; vertical-align: 2px; }
+			#live-legend small { flex-basis: 100%; color: #7a7066; }
 			#ambient-clock { font-variant-numeric: tabular-nums; font-weight: 600; color: #3b3630; }
 			#help { margin-top: 6px; border-top: 1px solid rgba(60,50,40,0.12); padding-top: 6px; font-size: 12px; color: #4d463e; }
 			#help p { margin: 0 0 6px; }

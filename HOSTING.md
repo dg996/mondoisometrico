@@ -51,6 +51,11 @@ Funzioni Vercel (`api/`), variabili d'ambiente del progetto Vercel:
 - `api/feedback.ts`: il pulsante "Segnala un problema o un'idea" crea una issue su GitHub con etichette
   `feedback` + `bug`/`idea`, `GITHUB_TOKEN` (fine-grained, solo questo repository, Issues: read and write).
   Senza token la pagina apre `issues/new` già compilata.
+- `api/traffic.ts`: il pulsante "Traffico in tempo reale" colora le strade con il traffico TomTom
+  (tile vettoriali del flusso, zoom 13, 16 tile per aggiornamento), `TOMTOM_API_KEY` (developer.tomtom.com).
+  Un aggiornamento ogni 10 minuti per tutto il sito (cache in memoria + CDN Vercel), tetto rigido di
+  5.000 richieste di tile al giorno: la quota gratuita TomTom è di 200.000 al mese. Senza chiave il
+  pulsante dice "non disponibile al momento". La chiave non va mai nel repository.
 
 ## 4. DNS
 

@@ -106,7 +106,7 @@ const viewer = OpenSeadragon({
   gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true, flickEnabled: true },
   preserveImageSizeOnResize: true,
 });
-Object.assign(window as object, { __viewer: viewer, OpenSeadragon, __world: world });
+Object.assign(window as object, { __viewer: viewer, OpenSeadragon, __world: world, __toScreen: (x: number, y: number) => toScreen(x, y) });
 
 // ---- coordinate helpers (global art px <-> canvas px) -----------------------------------------
 const canvas = document.createElement("canvas");
@@ -134,6 +134,30 @@ const heading = (world.camera.headingDeg * Math.PI) / 180;
 let traffic: Traffic | null = null, cats: Cats | null = null, trams: import("./trams.ts").Trams | null = null;
 let workers: import("./workers.ts").Workers | null = null;
 let lights: import("./lights.ts").Lights | null = null;
+// ---- live traffic (TomTom via /api/traffic), on the visitor's demand ----------------------------
+let live: import("./live-traffic.ts").LiveTraffic | null = null, liveOn = false, liveTimer = 0;
+const liveBtn = document.getElementById("live-toggle"), liveLegend = document.getElementById("live-legend"), liveStatus = document.getElementById("live-status");
+async function refreshLive() {
+  if (!liveOn || !liveStatus) return;
+  if (!traffic) { liveStatus.textContent = "strade in caricamento…"; setTimeout(refreshLive, 1500); return; }
+  if (!live) { const { LiveTraffic } = await import("./live-traffic.ts"); live = new LiveTraffic(traffic.wayRoads, world.enu2px); }
+  if (!live.levels) liveStatus.textContent = "carico il traffico reale…";
+  const ok = await live.load();
+  if (!liveOn) return;
+  if (ok) {
+    traffic.setCongestion(live.levels);
+    const t = new Date(live.at).toLocaleTimeString("it-IT", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit" });
+    liveStatus.textContent = `dati delle ${t} · © TomTom · si aggiorna ogni 10 minuti`;
+  } else liveStatus.textContent = live.levels ? "aggiornamento non riuscito: restano i dati precedenti · © TomTom" : "traffico reale non disponibile al momento";
+}
+liveBtn?.addEventListener("click", () => {
+  liveOn = !liveOn;
+  liveBtn.setAttribute("aria-pressed", String(liveOn));
+  if (liveLegend) liveLegend.hidden = !liveOn;
+  clearInterval(liveTimer);
+  if (liveOn) { refreshLive(); liveTimer = window.setInterval(refreshLive, 5 * 60_000); }
+  else traffic?.setCongestion(null);
+});
 const lightsCanvas = document.getElementById("lights") as HTMLCanvasElement | null;
 const lctx = lightsCanvas?.getContext("2d") ?? null;
 // the animations (their code and the roads, ~0.7 MB) wait until the first view's tiles are in
@@ -165,7 +189,7 @@ function loadAnimations() {
     if (roads.length) lights = new Lights(allRoads, world.enu2px, (x, y) => !world.activity || activity.containsRect(x, y));
     // Unbounded scenic flight routes escape the ready area. Keep them inactive until routes
     // can be certified against the same coverage mask as the road graph.
-    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __workers: workers, __lights: lights, __ambient: ambient, __parrots: null, __planes: null });
+    Object.assign(window as object, { __traffic: traffic, __cats: cats, __trams: trams, __workers: workers, __lights: lights, __ambient: ambient, __live: () => live, __parrots: null, __planes: null });
   });
 }
 setTimeout(loadAnimations, 6000); // slow connection: don't wait for every tile forever
@@ -267,6 +291,7 @@ function frame(t: number) {
   ctx.beginPath();
   for (const [x0,y0,x1,y1] of activity.rects) ctx.rect(x0*k+tx,y0*k+ty,(x1-x0)*k,(y1-y0)*k);
   ctx.clip(); // final guard for antialiasing / full silhouettes at tile boundaries
+  if (liveOn && live) live.draw(ctx, k, tx, ty); // live traffic colours on the roads, under the vehicles
   if (trams && showTraffic && px >= 0.28) {
     trams.step(dt);
     trams.draw(ctx, toScreen, px, [0, 0, w, hgt]);
@@ -293,7 +318,7 @@ function frame(t: number) {
     lctx.beginPath();
     for (const [x0, y0, x1, y1] of activity.rects) lctx.rect(x0 * k + tx, y0 * k + ty, (x1 - x0) * k, (y1 - y0) * k);
     lctx.clip();
-    lights.draw(lctx, toScreen, w, hgt, night, traffic && showTraffic ? traffic.lit : []);
+    lights.draw(lctx, toScreen, w, hgt, night, showTraffic ? [...(traffic?.lit ?? []), ...(trams?.lit ?? [])] : []);
     lctx.restore();
   }
   if (showBorders) drawBorders(dpr); // borders only on demand (B) — never force a metro overview

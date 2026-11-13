@@ -5,7 +5,7 @@
  * the beltline in the cabin, and the steep windscreen / rear-window slopes, are glass.
  */
 export type Vec3 = [number, number, number];
-type Mat = "body" | "glass" | "dark" | "lamp" | "tail" | "roof" | "skirt" | "stripe";
+type Mat = "body" | "glass" | "dark" | "lamp" | "tail" | "roof" | "skirt" | "stripe" | "tglass";
 interface Face { p: Vec3[]; n: Vec3; m: Mat }
 
 /** [station along the length (−0.5 rear … +0.5 front), top height (× H), beltline (× H), width (× W, default 1)] */
@@ -22,8 +22,8 @@ const PROFILES: Record<string, Profile> = {
   // ATAC city bus: a long box, windows from the waist to just under the roof, light roof
   bus: [[-0.5, 0.97, 0.36], [-0.495, 1.0, 0.36], [0.49, 1.0, 0.36], [0.5, 0.96, 0.36]],
   // low-floor tram car; the cab cars get a raked, tapering nose (tram-cab), middle cars square ends
-  tram: [[-0.5, 0.96, 0.4], [-0.49, 1.0, 0.4], [0.49, 1.0, 0.4], [0.5, 0.96, 0.4]],
-  "tram-cab": [[-0.5, 0.96, 0.4], [-0.49, 1.0, 0.4], [0.36, 1.0, 0.4], [0.44, 0.93, 0.4, 0.94], [0.49, 0.72, 0.38, 0.78], [0.5, 0.5, 0.36, 0.7]],
+  tram: [[-0.5, 0.96, 0.38], [-0.49, 1.0, 0.38], [0.49, 1.0, 0.38], [0.5, 0.96, 0.38]],
+  "tram-cab": [[-0.5, 0.96, 0.38], [-0.49, 1.0, 0.38], [0.34, 1.0, 0.38], [0.42, 0.95, 0.38, 0.96], [0.47, 0.8, 0.37, 0.86], [0.5, 0.42, 0.34, 0.74]],
   // articulation bellows and roof equipment: plain boxes
   box: [[-0.5, 1.0, 0.0], [0.5, 1.0, 0.0]],
 };
@@ -42,10 +42,10 @@ function mesh(kind: string, L: number, W: number, H: number, ends = 3): Face[] {
     const a = s * L, zt = top * H, zbelt = Math.min(belt * H, zt - 0.02), wb = (W / 2) * wf;
     const wt = kind === "bus" || kind === "van" || tramLike || kind === "box" ? W * 0.48 * wf : zt - zbelt > 0.25 ? W * 0.39 : W * 0.47;
     if (kind === "box") return [[a, -wb, 0], [a, -wb, zt], [a, wb, zt], [a, wb, 0]];
-    if (tramLike) { // dark skirt to 30 %, coloured stripe to the beltline, windows to 86 %, light body, roof
-      const zw = Math.min(zt - 0.05, H * 0.86), zs = Math.min(H * 0.3, zbelt - 0.05);
-      return [[a, -wb * 0.96, zb], [a, -wb, zb + 0.18], [a, -wb, zs], [a, -wb, zbelt], [a, -wb, zw], [a, -wt, zt],
-        [a, wt, zt], [a, wb, zw], [a, wb, zbelt], [a, wb, zs], [a, wb, zb + 0.18], [a, wb * 0.96, zb]];
+    if (tramLike) { // dark skirt, white body, red stripe under a dark window band (38–80 %), white cornice, roof
+      const zw = Math.min(zt - 0.05, H * 0.8), zs = Math.min(H * 0.33, zbelt - 0.05), zk = Math.min(H * 0.13, zs - 0.05);
+      return [[a, -wb * 0.94, zb], [a, -wb, zk], [a, -wb, zs], [a, -wb, zbelt], [a, -wb, zw], [a, -wb * 0.99, zt - 0.12], [a, -wt, zt],
+        [a, wt, zt], [a, wb * 0.99, zt - 0.12], [a, wb, zw], [a, wb, zbelt], [a, wb, zs], [a, wb, zk], [a, wb * 0.94, zb]];
     }
     if (kind === "bus") { // red skirt, window band to 86 %, red band and light roof above
       const zw = Math.min(zt - 0.05, H * 0.86);
@@ -73,12 +73,13 @@ function mesh(kind: string, L: number, W: number, H: number, ends = 3): Face[] {
       const beltZ = Math.min(prof[i][2], prof[i + 1][2]) * H, topZ = Math.min(prof[i][1], prof[i + 1][1]) * H;
       let m: Mat = "body";
       if (kind === "box") m = "body";
-      else if (tramLike) { // dark skirt, coloured stripe under the windows, window band, light body, roof
-        if (n[2] > 0.85) m = "roof";
-        else if (Math.abs(n[0]) > 0.4 && zMid > beltZ) m = "glass";      // raked windscreen of the cab
-        else if (zMid < H * 0.3) m = "skirt";
+      else if (tramLike) { // dark skirt, white body, red stripe under the windows, window band, white cornice, roof
+        if (n[2] > 0.6) m = "roof";
+        else if (Math.abs(n[0]) > 0.4 && zMid > beltZ && zMid < H * 0.9) m = "tglass"; // raked windscreen of the cab
+        else if (zMid < H * 0.13) m = "skirt";
+        else if (zMid < H * 0.33) m = "body";
         else if (zMid < beltZ) m = "stripe";
-        else if (zMid < H * 0.86) m = "glass";
+        else if (zMid < H * 0.8) m = "tglass";
       }
       else if (zMid < zb + 0.16) m = "dark";
       else if (n[2] > 0.85) m = kind === "bus" ? "roof" : "body";
@@ -94,11 +95,11 @@ function mesh(kind: string, L: number, W: number, H: number, ends = 3): Face[] {
   // end caps: tail at the back, nose at the front (with lamps)
   const cap = (sec: Vec3[], front: boolean) => {
     const p = front ? sec : [...sec].reverse();
-    faces.push({ p, n: [front ? 1 : -1, 0, 0], m: kind === "tram" || kind === "tram-cab" ? "skirt" : "body" });
+    faces.push({ p, n: [front ? 1 : -1, 0, 0], m: kind === "tram" ? "skirt" : "body" });
     if (kind === "box" || kind === "tram") return; // inner tram ends meet a bellows: no lamps
     if (kind === "tram-cab") {
-      if (front) { const a = sec[0][0] + 0.01, w = (W / 2) * 0.7, z0 = H * 0.32, z1 = H * 0.42;
-        for (const side of [1, -1]) faces.push({ p: [[a, side * w * 0.95, z0], [a, side * w * 0.55, z0], [a, side * w * 0.55, z1], [a, side * w * 0.95, z1]], n: [1, 0, 0], m: "lamp" }); }
+      if (front) { const a = sec[0][0] + 0.01, w = (W / 2) * 0.74, z0 = H * 0.2, z1 = H * 0.27;
+        for (const side of [1, -1]) faces.push({ p: [[a, side * w * 0.95, z0], [a, side * w * 0.6, z0], [a, side * w * 0.6, z1], [a, side * w * 0.95, z1]], n: [1, 0, 0], m: "lamp" }); }
       return;
     }
     const a = sec[0][0] + (front ? 0.01 : -0.01), z0 = sec[2][2] - 0.22, z1 = sec[2][2] - 0.05, w = W / 2;
@@ -115,7 +116,7 @@ function mesh(kind: string, L: number, W: number, H: number, ends = 3): Face[] {
 }
 
 const MAT: Record<Mat, [number, number, number]> = { body: [0, 0, 0], glass: [62, 82, 102], dark: [30, 31, 34], lamp: [250, 246, 226], tail: [196, 30, 30],
-  roof: [232, 230, 224], skirt: [70, 72, 76], stripe: [214, 64, 40] };
+  roof: [232, 230, 224], skirt: [70, 72, 76], stripe: [200, 44, 38], tglass: [34, 40, 50] };
 
 /**
  * Draw one car. `toLocal`: ENU origin c, forward d; `proj` ENU -> screen; `view` the camera's view
@@ -157,18 +158,37 @@ export function drawCar(ctx: CanvasRenderingContext2D, proj: (p: Vec3) => [numbe
     ctx.lineWidth = 0.5; ctx.strokeStyle = ctx.fillStyle; ctx.stroke();
   }
   const tram = kind === "tram" || kind === "tram-cab";
-  if ((kind === "bus" || tram) && pxPerM > 3) { // window pillars every ~1.5 m and door leaves on the visible flank
-    const side = (r[0] * view[0] + r[1] * view[1]) < 0 ? 1 : -1, y = side * (W / 2 + 0.01), z0 = H * (tram ? 0.4 : 0.36), z1 = H * 0.86;
+  if ((kind === "bus" && pxPerM > 3) || (tram && pxPerM > 1.4)) { // window pillars and door leaves on the visible flank
+    const side = (r[0] * view[0] + r[1] * view[1]) < 0 ? 1 : -1, y = side * (W / 2 + 0.01), z0 = H * (tram ? 0.38 : 0.36), z1 = H * (tram ? 0.8 : 0.86);
     const line = (a: number, za: number, zb2: number, css: string, width: number) => {
       const [x1, y1] = proj(world([a, y, za])), [x2, y2] = proj(world([a, y, zb2]));
       ctx.strokeStyle = css; ctx.lineWidth = width; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     };
-    const pillar = tram ? "rgb(24,26,30)" : `rgb(${color.map((v) => Math.round(v * 0.62)).join(",")})`; // black frames on trams
-    for (let a = -L / 2 + 1.2; a < L / 2 - (kind === "tram-cab" ? 2 : 1); a += 1.5) line(a, z0, z1, pillar, Math.max(0.6, pxPerM * (tram ? 0.08 : 0.12)));
-    for (const a of tram ? [L * 0.22, -L * 0.28] : L > 15 ? [L * 0.38, L * 0.05, -L * 0.3] : [L * 0.38, -L * 0.05]) {
-      ctx.fillStyle = "rgba(28,30,34,0.9)"; ctx.beginPath();
-      [[a + 0.6, 0.25], [a - 0.6, 0.25], [a - 0.6, z1], [a + 0.6, z1]].forEach(([q, z], i) => { const [x, yy] = proj(world([q, y, z])); i ? ctx.lineTo(x, yy) : ctx.moveTo(x, yy); });
+    const quad = (pts: Array<[number, number]>, fill: string) => {
+      ctx.fillStyle = fill; ctx.beginPath();
+      pts.forEach(([q, z], i) => { const [x, yy] = proj(world([q, y, z])); i ? ctx.lineTo(x, yy) : ctx.moveTo(x, yy); });
       ctx.closePath(); ctx.fill();
+    };
+    if (tram) {
+      // glazed double doors (floor to the top of the window band), white frames between the windows
+      const doors = [L * 0.24, -L * 0.26], dz0 = H * 0.13;
+      for (const a of doors) {
+        quad([[a + 0.68, dz0], [a - 0.68, dz0], [a - 0.68, z1], [a + 0.68, z1]], "rgb(214,212,206)"); // door frame
+        quad([[a + 0.6, dz0 + 0.05], [a + 0.04, dz0 + 0.05], [a + 0.04, z1 - 0.06], [a + 0.6, z1 - 0.06]], "rgb(40,46,56)");
+        quad([[a - 0.04, dz0 + 0.05], [a - 0.6, dz0 + 0.05], [a - 0.6, z1 - 0.06], [a - 0.04, z1 - 0.06]], "rgb(40,46,56)");
+      }
+      const frame = `rgb(${Math.round(color[0] * 0.92)},${Math.round(color[1] * 0.92)},${Math.round(color[2] * 0.92)})`;
+      for (let a = -L / 2 + 1.0; a < L / 2 - (kind === "tram-cab" ? 1.9 : 0.8); a += 1.6) {
+        if (doors.some((d) => Math.abs(a - d) < 0.9)) continue;
+        line(a, z0, z1, frame, Math.max(0.6, pxPerM * 0.14));
+      }
+      // a light reflection along the glazing
+      const [x1, y1] = proj(world([-L / 2 + 0.3, y, H * 0.74])), [x2, y2] = proj(world([L / 2 - 0.3, y, H * 0.74]));
+      ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = Math.max(0.5, pxPerM * 0.18); ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    } else {
+      const pillar = `rgb(${color.map((v) => Math.round(v * 0.62)).join(",")})`;
+      for (let a = -L / 2 + 1.2; a < L / 2 - 1; a += 1.5) line(a, z0, z1, pillar, Math.max(0.6, pxPerM * 0.12));
+      for (const a of L > 15 ? [L * 0.38, L * 0.05, -L * 0.3] : [L * 0.38, -L * 0.05]) quad([[a + 0.6, 0.25], [a - 0.6, 0.25], [a - 0.6, z1], [a + 0.6, z1]], "rgba(28,30,34,0.9)");
     }
   }
   if (taxi && pxPerM > 3) { // Rome taxi roof sign
