@@ -427,7 +427,14 @@ document.getElementById("credits")!.innerHTML = [
   `<a href="https://github.com/dg996/mondoisometrico">Source</a>`,
   `Made by <a href="https://domenicogagliardi.com">Domenico Gagliardi</a>`,
 // each credit stays on one line; the separator rides at the end of the previous one so no line starts with "·"
-].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ");
+].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ")
+  // phones: the OpenStreetMap credit always shows (ODbL); the other sources fold behind "Fonti"
+  + ` <button type="button" id="credits-toggle" aria-expanded="false">Fonti ▴</button>`;
+document.getElementById("credits-toggle")!.addEventListener("click", (e) => {
+  const open = document.body.classList.toggle("credits-open");
+  (e.currentTarget as HTMLButtonElement).setAttribute("aria-expanded", String(open));
+  (e.currentTarget as HTMLButtonElement).textContent = open ? "Chiudi ▾" : "Fonti ▴";
+});
 // the panels sit just above the credit line, whatever its height (on a phone it wraps to several lines)
 {
   const credits = document.getElementById("credits")!;

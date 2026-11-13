@@ -31,9 +31,31 @@ export function weatherLabel(code: number): string {
 const PRESETS: Record<string, Weather> = {
   sereno: { code: 0, cloud: 5, rain: 0, temp: 22, wind: 6, at: 0 },
   nuvoloso: { code: 3, cloud: 95, rain: 0, temp: 14, wind: 10, at: 0 },
+  pioggerella: { code: 51, cloud: 100, rain: 0.1, temp: 14, wind: 8, at: 0 },
+  rovesci: { code: 80, cloud: 85, rain: 0.1, temp: 20, wind: 12, at: 0 },
   pioggia: { code: 63, cloud: 100, rain: 3, temp: 12, wind: 18, at: 0 },
+  temporale: { code: 95, cloud: 100, rain: 9, temp: 16, wind: 30, at: 0 },
   nebbia: { code: 45, cloud: 100, rain: 0, temp: 8, wind: 2, at: 0 },
 };
+
+/**
+ * Rain intensity 0..3 from the live weather: the WMO code's own grade (light / moderate / heavy
+ * drizzle, rain, showers; thunderstorm = heavy), raised by the measured precipitation (mm in the
+ * last 15 min) when that says more. 0 = dry.
+ */
+export function rainLevel(w: Pick<Weather, "code" | "rain">): number {
+  const c = w.code;
+  let level = 0;
+  if (c === 51 || c === 56 || c === 61 || c === 66 || c === 80) level = 1;
+  else if (c === 53 || c === 63 || c === 81) level = 2;
+  else if (c === 55 || c === 57 || c === 65 || c === 67 || c === 82 || c >= 95) level = 3;
+  if (w.rain > 0.05) level = Math.max(level, 1);
+  if (w.rain >= 1) level = Math.max(level, 2);
+  if (w.rain >= 2.5) level = 3;
+  return level;
+}
+/** per rain level: short streaks per 1600×900 css px, their length and width (css px), opacity */
+const RAIN = [null, { n: 380, len: 9, w: 1.4, a: 0.6 }, { n: 560, len: 12, w: 1.5, a: 0.62 }, { n: 900, len: 15, w: 1.7, a: 0.7 }] as const;
 
 /** Test overrides (?ora, ?meteo) work only on the dev server, never on the published map. */
 const testParam = (name: string) => ((import.meta as { env?: { DEV?: boolean } }).env?.DEV ? new URLSearchParams(location.search).get(name) : null);
@@ -141,25 +163,30 @@ export function startAmbient(): Ambient {
     minutes: () => minutes ?? romeNow(),
     draw(ctx, w, h, dt) {
       if (film() || !weather) return;
-      // rain stays a light veil of streaks: streets, cars and monuments must read through it at any zoom
-      const rainy = weather.rain > 0.05 || (weather.code >= 51 && weather.code <= 67) || (weather.code >= 80 && weather.code <= 99);
-      const want = rainy ? Math.min(420, 110 + weather.rain * 70) * (w * h) / (1600 * 900) : 0;
+      // rain only when it rains in Rome, as much as it rains: clearly visible, thin enough that streets,
+      // cars and monuments read through it at any zoom (sizes in css px, so the same on retina screens)
+      const spec = RAIN[rainLevel(weather)];
+      const dpr = window.devicePixelRatio || 1;
+      const want = spec ? (spec.n * (w * h)) / (1600 * 900 * dpr * dpr) : 0;
       while (drops.length < want) drops.push([Math.random() * w, Math.random() * h, 0.6 + Math.random() * 0.8]);
       drops.length = Math.min(drops.length, Math.ceil(want));
-      if (drops.length) {
-        const slant = Math.min(0.5, weather.wind / 60), fall = 900 * dt;
+      if (spec && drops.length) {
+        const slant = Math.min(0.45, weather.wind / 70), fall = 950 * dpr * dt, L = spec.len * dpr;
         ctx.save();
-        ctx.strokeStyle = "rgba(228,235,244,0.32)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
+        ctx.lineCap = "round";
+        // a faint dark edge under a pale streak: rain reads on the light stone and roofs as on asphalt
+        for (const [style, width, alpha] of [["rgba(38,48,64,1)", spec.w + 1.2, spec.a * 0.3], ["rgba(238,244,252,1)", spec.w, spec.a]] as const) {
+          ctx.strokeStyle = style; ctx.globalAlpha = alpha; ctx.lineWidth = width * dpr;
+          ctx.beginPath();
+          for (const d of drops) { ctx.moveTo(d[0], d[1]); ctx.lineTo(d[0] - L * d[2] * slant, d[1] - L * d[2]); }
+          ctx.stroke();
+        }
+        ctx.restore();
         for (const d of drops) {
           d[1] += fall * d[2]; d[0] += fall * d[2] * slant;
-          if (d[1] > h) { d[1] -= h + 20; d[0] = Math.random() * w; }
+          if (d[1] > h + L) { d[1] -= h + 2 * L; d[0] = Math.random() * w; }
           if (d[0] > w) d[0] -= w;
-          ctx.moveTo(d[0], d[1]); ctx.lineTo(d[0] - 14 * d[2] * slant, d[1] - 14 * d[2]);
         }
-        ctx.stroke();
-        ctx.restore();
       }
       const foggy = weather.code === 45 || weather.code === 48;
       fog += ((foggy ? 0.18 : 0) - fog) * Math.min(1, dt);
