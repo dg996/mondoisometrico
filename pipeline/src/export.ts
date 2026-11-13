@@ -38,6 +38,7 @@ import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { landmarkProjector } from "./landmark-anchors.ts";
 import { railIndex, snapToRails } from "./transit-snap.ts";
+import { crossingIndex, crossingsAlong } from "./crossings.ts";
 import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
 import { fetchGtfs, readTransit } from "./transit.ts";
 import { cloudEdge } from "./clouds.ts";
@@ -330,6 +331,7 @@ async function exportRoads(areas: string[], heights: Heights) {
     const profiles = new Map(features.filter(f=>f.bridge && f.l).map(f=>[f.id, f.l!]));
     const water = features.filter(f => ["water", "sea", "pool"].includes(f.k) && f.r).map(f => f.r!);
     const waterAt = (x: number, y: number) => inWater(x, y, water);
+    const zebra = crossingIndex(features.filter((f) => f.k === "crossing" && f.l).map((f) => f.l!));
     const els = readJson(f).elements.filter((el: any) => {
       const t = el.tags ?? {};
       if (seen.has(el.id)) return false;
@@ -365,6 +367,7 @@ async function exportRoads(areas: string[], heights: Heights) {
           }
         }
         ways.push({
+          x: crossingsAlong(samples, zebra),
           bridge: !!t.bridge && t.bridge !== "no", water: waterSamples, waterAt,
           y: Number(t.layer) || (t.bridge && t.bridge !== "no" ? 1 : 0),
           c: cls, o: t.oneway === "-1" ? -1 : isOneway(t) ? 1 : 0,
@@ -495,11 +498,13 @@ async function exportTransit(areas: string[], heights: Heights) {
  *   s            per sample e, n, u in 0.1 m: a way's first sample absolute, then differences
  *   v            per way: number of runs, then run lengths of visible / hidden samples, visible first
  */
-function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }>) {
+function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[]; x?: number[] }>) {
   const ids = new Map<number, number>(), id = (n: number) => ids.get(n) ?? ids.set(n, ids.size).get(n)!;
-  const out = { v: 2, c: [] as number[], o: [] as number[], l: [] as number[], w: [] as number[], a: [] as number[], b: [] as number[], n: [] as number[], s: [] as number[], vis: [] as number[] };
+  const out = { v: 2, c: [] as number[], o: [] as number[], l: [] as number[], w: [] as number[], a: [] as number[], b: [] as number[], n: [] as number[], s: [] as number[], vis: [] as number[], x: [] as number[] };
   for (const w of ways) {
     out.c.push(w.c); out.o.push(w.o); out.l.push(w.l); out.w.push(w.w); out.a.push(id(w.a)); out.b.push(id(w.b));
+    const x = w.x ?? [];
+    out.x.push(x.length / 2, ...x.map((v) => Math.round(v * 10))); // zebra bands: [distance from start, half length] (dm)
     out.n.push(w.s.length / 4);
     let pe = 0, pn = 0, pu = 0, cur = 1, run = 0;
     const runs: number[] = [];

@@ -441,6 +441,13 @@ function landmarksInWindow(i: number, j: number): string[] {
 }
 
 async function paintWindow(i: number, j: number) {
+  // the /tmp sandbox keeps ~14 MB of copies per window (inputs, result, log): removed whatever the
+  // outcome, or a night of painting fills the disk (it did on 13 November, 8 GB by 06:29)
+  try { await paintWindowIn(i, j); }
+  finally { rmSync(join("/tmp/mondoisometrico-paint", areaName, `${i}_${j}`), { recursive: true, force: true }); }
+}
+
+async function paintWindowIn(i: number, j: number) {
   const skipFile = join(base, "paint-skip.json");
   if (existsSync(skipFile) && !args.force) {
     try {

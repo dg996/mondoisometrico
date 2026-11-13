@@ -46,9 +46,22 @@ export function activeRoads(roads: Road[], M: number[][], mask: ActivityMask): R
     const mx = Math.hypot(M[0][0],M[0][1])*radius + Math.abs(M[0][2])*4 + 2;
     const my = Math.hypot(M[1][0],M[1][1])*radius + Math.abs(M[1][2])*4 + 2;
     let start = -1;
+    // distance along the way at each sample: zebra positions (r.x) are measured from the way's start
+    const cum = new Float64Array(n);
+    for (let i = 1; i < n; i++) cum[i] = cum[i-1] + Math.hypot(S[i*4]-S[(i-1)*4], S[i*4+1]-S[(i-1)*4+1]);
+    const zebrasIn = (d0: number, d1: number) => {
+      if (!r.x?.length) return undefined;
+      const x: number[] = [];
+      for (let k = 0; k < r.x.length; k += 2) if (r.x[k] + r.x[k+1] > d0 && r.x[k] - r.x[k+1] < d1) x.push(r.x[k] - d0, r.x[k+1]);
+      return x.length ? x : undefined;
+    };
     const flush = (end: number) => {
-      if (start >= 0 && end > start) result.push({...r, a:start === 0 ? r.a : cut--,
-        b:end === n-1 ? r.b : cut--, s:S.slice(start*4,(end+1)*4)});
+      if (start >= 0 && end > start) {
+        const piece: Road = {...r, a:start === 0 ? r.a : cut--, b:end === n-1 ? r.b : cut--, s:S.slice(start*4,(end+1)*4)};
+        const x = zebrasIn(cum[start], cum[end]);
+        if (x) piece.x = x; else delete piece.x;
+        result.push(piece);
+      }
       start = -1;
     };
     for (let i=1;i<n;i++) {

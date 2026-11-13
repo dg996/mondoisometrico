@@ -14,6 +14,7 @@ export interface Road {
   w?: number;       // carriageway width (m), as drawn on the map
   a: number; b: number; // OSM start / end node ids
   s: number[];      // [e, n, u, visible] × samples (2 m in new exports; legacy ≤ 6 m)
+  x?: number[];     // OSM marked crossings: [distance from start, half length of the zebra band] …
 }
 
 type Vec3 = [number, number, number];
@@ -87,6 +88,8 @@ export class Traffic {
   /** `${way}:${dir}:in|out` -> distance from the node where this carriageway stops overlapping the
    *  others meeting it at a narrow angle (merges / splits): the stop line and the box edge there */
   private mergeR = new Map<string, number>();
+  /** "w:dir:in|out" -> distance from the node to beyond the zebra crossing next to that junction */
+  private zebraR = new Map<string, number>();
   private t = 0;
   private rand = mulberry(7);
   /** vehicles drawn in the last frame (debug / tests) */
@@ -117,6 +120,7 @@ export class Traffic {
     for (const [n, d] of this.degree) if (d <= 2) this.nodeR.set(n, 0); // not a junction: no box, no stop line
     this.clusterJunctions();
     this.mergeLines();
+    this.zebraLines();
     // "not too many": ~1 vehicle per 55 weighted metres (only on-screen ones are drawn)
     const weights = this.ways.map((w) => w.len * CLASS_WEIGHT[w.r.c]);
     const total = weights.reduce((a, b) => a + b, 0);
@@ -144,10 +148,11 @@ export class Traffic {
       if (this.wayVisible(way) < 0.55) continue;
       // not inside the junction boxes / merge zones at either end
       const endNode = dir === 1 ? way.r.b : way.r.a, startNode = dir === 1 ? way.r.a : way.r.b;
-      const lo = len / 2 + Math.max(this.nodeR.get(startNode) ?? 0, this.mergeR.get(`${w}:${dir}:out`) ?? 0);
-      const hi = way.len - len / 2 - Math.max(this.nodeR.get(endNode) ?? 0, this.mergeR.get(`${w}:${dir}:in`) ?? 0) - 1;
+      const lo = len / 2 + Math.max(this.nodeR.get(startNode) ?? 0, this.mergeR.get(`${w}:${dir}:out`) ?? 0, this.zebraR.get(`${w}:${dir}:out`) ?? 0);
+      const hi = way.len - len / 2 - Math.max(this.nodeR.get(endNode) ?? 0, this.mergeR.get(`${w}:${dir}:in`) ?? 0, this.zebraR.get(`${w}:${dir}:in`) ?? 0) - 1;
       if (hi <= lo) continue;
       const s = lo + this.rand() * (hi - lo);
+      if (this.onZebra(w, dir, s, len)) continue; // nobody parks on the stripes
       if (!this.sampleVisible(way, s, dir, len)) continue; // exact spawn point must be on visible asphalt
       const lane = bus ? 0 : Math.floor(this.rand() * way.r.l);
       // never spawn on top of another vehicle
@@ -384,12 +389,82 @@ export class Traffic {
   private entryClear(v: Vehicle, next: { w: number; dir: 1 | -1 }) {
     const lane = v.bus ? 0 : Math.min(v.lane, this.ways[next.w].r.l - 1);
     const g = this.lanes.get(`${next.w}:${next.dir}:${lane}`);
-    return !g?.length || g[0].s - g[0].len / 2 > (this.nodeR.get(this.endNode(v)) ?? 4) + v.len + GAP;
+    const clear = Math.max(this.nodeR.get(this.endNode(v)) ?? 4, this.zebraR.get(`${next.w}:${next.dir}:out`) ?? 0);
+    return !g?.length || g[0].s - g[0].len / 2 > clear + v.len + GAP;
+  }
+
+  /**
+   * Distance from the front to the next zebra band on this way that the vehicle must not enter yet
+   * (the queue ahead leaves no room beyond it), or null. Bands the front already reached are ignored:
+   * a vehicle that has started over the stripes drives on.
+   */
+  private zebraAhead(v: Vehicle, lead: Vehicle | undefined): number | null {
+    const way = this.ways[v.w];
+    if (!way.r.x?.length) return null;
+    const front = v.s + v.len / 2;
+    for (const [a, b] of this.zebras(v.w, v.dir)) {
+      if (a < front - 0.05) continue;
+      if (a - front > 40) return null;
+      if (way.len - b < Math.max(this.nodeR.get(this.endNode(v)) ?? 0, this.zebraR.get(`${v.w}:${v.dir}:in`) ?? 0)) return null; // the stop line handles it
+      let rear = Infinity, speed = 0;
+      if (lead) { rear = lead.s - lead.len / 2; speed = lead.v; }
+      else if (v.next && v.through) {
+        const nl = v.bus ? 0 : Math.min(v.lane, this.ways[v.next.w].r.l - 1), first = this.lanes.get(`${v.next.w}:${v.next.dir}:${nl}`)?.[0];
+        if (first) { rear = way.len + first.s - first.len / 2; speed = first.v; }
+      }
+      // room for the whole body past the stripes, counting on a leader that is moving away
+      if (rear + Math.min(speed, 6) * 1.5 - b < v.len + GAP) return a - front;
+      return null;
+    }
+    return null;
   }
 
   /** Distance from the vehicle's front to the stop line before the junction box ahead. */
   private toStop(v: Vehicle) {
-    return this.ways[v.w].len - v.s - v.len / 2 - Math.max(this.nodeR.get(this.endNode(v)) ?? 4, this.mergeR.get(`${v.w}:${v.dir}:in`) ?? 0);
+    return this.ways[v.w].len - v.s - v.len / 2 - Math.max(this.nodeR.get(this.endNode(v)) ?? 4, this.mergeR.get(`${v.w}:${v.dir}:in`) ?? 0, this.zebraR.get(`${v.w}:${v.dir}:in`) ?? 0);
+  }
+
+  /** Zebra bands of way w in travel order for dir: [start, end] along the vehicle's s. */
+  private zebras(w: number, dir: 1 | -1): Array<[number, number]> {
+    const way = this.ways[w], x = way.r.x ?? [], out: Array<[number, number]> = [];
+    for (let i = 0; i < x.length; i += 2) {
+      const d = dir === 1 ? x[i] : way.len - x[i];
+      out.push([d - x[i + 1], d + x[i + 1]]);
+    }
+    return dir === 1 ? out : out.reverse();
+  }
+
+  /** A body centred at s overlaps a zebra band of way w. */
+  private onZebra(w: number, dir: 1 | -1, s: number, len: number) {
+    return this.zebras(w, dir).some(([a, b]) => s + len / 2 > a - 0.3 && s - len / 2 < b + 0.3);
+  }
+
+  /**
+   * Zebra crossings at a junction (within its box or just past it): the stop line moves back to
+   * before the stripes, a vehicle only crosses the box when there is room beyond the stripes on the
+   * other side, and it holds the junction until its rear has cleared them.
+   */
+  private zebraLines() {
+    this.ways.forEach((way, w) => {
+      for (const dir of [1, -1] as const) {
+        if ((dir === 1 && way.r.o === -1) || (dir === -1 && way.r.o === 1)) continue;
+        const end = dir === 1 ? way.r.b : way.r.a, start = dir === 1 ? way.r.a : way.r.b;
+        const bands = this.zebras(w, dir);
+        if (!bands.length) continue;
+        const rIn = this.nodeR.get(end) ?? 0, rOut = this.nodeR.get(start) ?? 0;
+        if (rIn > 0) {
+          let d = 0; // from the node back to before the farthest band near it
+          for (const [a] of bands) if (way.len - a > d && way.len - a <= Math.max(rIn, this.mergeR.get(`${w}:${dir}:in`) ?? 0) + 12) d = way.len - a;
+          for (const [a, b] of bands) if (way.len - b < d && way.len - a > d) d = way.len - a; // bands overlapping the zone
+          if (d > 0 && d < way.len - 4) this.zebraR.set(`${w}:${dir}:in`, d + 0.8);
+        }
+        if (rOut > 0) {
+          let d = 0;
+          for (const [, b] of bands) if (b > d && b <= Math.max(rOut, this.mergeR.get(`${w}:${dir}:out`) ?? 0) + 12) d = b;
+          if (d > 0 && d < way.len - 4) this.zebraR.set(`${w}:${dir}:out`, d + 0.8);
+        }
+      }
+    });
   }
 
   /**
@@ -572,6 +647,9 @@ export class Traffic {
             }
           }
         }
+        // never stop on the stripes: enter a zebra crossing only when there is room past it
+        const zebra = this.zebraAhead(v, g[k + 1]);
+        if (zebra !== null) target = Math.min(target, Math.max(0, zebra - 0.3) / HEADWAY);
         // approaching the junction: slow for the turn; at the stop line wait until it's granted
         const toStop = this.toStop(v);
         if (!v.through && v.next && toStop < 30) {
@@ -585,7 +663,7 @@ export class Traffic {
         // left the crossing behind (this way leads out of it and the rear has cleared the box): release it
         if (v.holding >= 0) {
           const start = v.dir === 1 ? way.r.a : way.r.b;
-          const clear = Math.max(this.nodeR.get(start) ?? 0, this.mergeR.get(`${v.w}:${v.dir}:out`) ?? 0);
+          const clear = Math.max(this.nodeR.get(start) ?? 0, this.mergeR.get(`${v.w}:${v.dir}:out`) ?? 0, this.zebraR.get(`${v.w}:${v.dir}:out`) ?? 0);
           if (this.groupOf(this.endNode(v)) !== v.holding && (this.groupOf(start) !== v.holding || v.s - v.len / 2 > clear)) this.release(v);
           else { const h = this.nodeHold.get(v.holding); if (h) h.last = this.t; } // still inside: keep the crossing held
         }
@@ -593,6 +671,8 @@ export class Traffic {
         v.v = target > v.v ? Math.min(target, v.v + ACCEL * dt) : Math.max(target, v.v - BRAKE * dt);
         if (lead) v.v = Math.min(v.v, Math.max(0, (lead.s - lead.len / 2 - (v.s + v.len / 2) - 0.5) / dt));
         const before = this.toStop(v);
+        if (zebra !== null) v.v = Math.min(v.v, Math.max(0, zebra) / dt); // and never roll onto them
+        v.v = Math.max(0, v.v);
         v.s += v.v * dt;
         // without a green, never roll past the stop line into a crossing (fast arrivals overshot it)
         if (!v.through && v.next && before >= -0.01 && this.toStop(v) < 0 && this.controlled(this.endNode(v)) && v.holding !== this.groupOf(this.endNode(v))) {
