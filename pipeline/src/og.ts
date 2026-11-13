@@ -61,6 +61,14 @@ async function og(slug: string, heading: string, name: string) {
 
   // every source credit, without the "Painted with AI" label (clips keep it)
   const credits = region.credits.join(" · ").split(" · ").filter((c) => !/painted with ai/i.test(c)).join(" · ");
+  const subtitle = region.country === "Italy" ? "La mappa isometrica di Roma, dai dati aperti" : "An isometric city map from open data";
+  // credits wrap at a " · " so the whole line stays on the card (~118 chars of 17 px text fit)
+  const lines: string[] = [];
+  for (const part of credits.split(" · ")) {
+    const last = lines.length - 1;
+    if (last >= 0 && (lines[last] + " · " + part).length <= 118) lines[last] += " · " + part;
+    else lines.push(part);
+  }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">
   <defs>
     <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
@@ -71,11 +79,11 @@ async function og(slug: string, heading: string, name: string) {
     </linearGradient>
   </defs>
   <rect width="${W}" height="220" fill="url(#top)"/>
-  <rect y="${H - 90}" width="${W}" height="90" fill="url(#bot)"/>
+  <rect y="${H - 120}" width="${W}" height="120" fill="url(#bot)"/>
   <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif" fill="#fff">
     <text x="56" y="104" font-size="68" font-weight="700" letter-spacing="-1">${esc(heading)}</text>
-    <text x="58" y="148" font-size="28" font-weight="400" fill-opacity="0.88">An isometric city map from open data</text>
-    <text x="58" y="${H - 26}" font-size="17" fill-opacity="0.9">${esc(credits)}</text>
+    <text x="58" y="148" font-size="28" font-weight="400" fill-opacity="0.88">${esc(subtitle)}</text>
+    ${lines.map((l, k) => `<text x="58" y="${H - 26 - (lines.length - 1 - k) * 22}" font-size="17" fill-opacity="0.9">${esc(l)}</text>`).join("\n    ")}
   </g>
 </svg>`;
   mkdirSync(OUT, { recursive: true });
