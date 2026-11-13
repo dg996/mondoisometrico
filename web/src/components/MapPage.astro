@@ -96,8 +96,36 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 				<p>Roma disegnata da open data e dipinta con AI. Le zone dipinte crescono a ogni aggiornamento; fuori, la città resta sfocata tra le nuvole.</p>
 				<p>Auto, bus e tram sono un'animazione illustrativa, solo nelle zone dipinte. Luce e meteo seguono l'ora e il tempo reali di Roma.</p>
 				<p class="keys"><b>H</b> nascondi comandi · <b>T</b> traffico · <b>P</b> foto/dipinto · <b>B</b> confini · <b>V</b> modalità video</p>
+				<button type="button" id="feedback-open" aria-haspopup="dialog" aria-controls="feedback">Segnala un problema o un'idea</button>
 			</div>
 		</div>
+		<!-- feedback (feedback.ts → api/feedback.ts → GitHub issue; fallback: prefilled issues/new link) -->
+		<dialog id="feedback" aria-labelledby="feedback-title">
+			<form id="feedback-form" novalidate>
+				<div class="fb-head">
+					<h2 id="feedback-title">Segnala un problema o un'idea</h2>
+					<button type="button" class="fb-close" data-close aria-label="Chiudi" title="Chiudi">×</button>
+				</div>
+				<fieldset class="fb-kind">
+					<legend>Tipo</legend>
+					<label><input type="radio" name="kind" value="bug" checked /> Problema</label>
+					<label><input type="radio" name="kind" value="idea" /> Idea</label>
+				</fieldset>
+				<label class="fb-field">Cosa hai notato?
+					<textarea name="text" rows="5" minlength="10" maxlength="4000" required placeholder="Descrivi il problema o l'idea (dove, cosa vedi, cosa ti aspettavi)"></textarea>
+				</label>
+				<label class="fb-field">Contatto <span class="fb-opt">(facoltativo)</span>
+					<input type="text" name="contact" maxlength="200" autocomplete="off" placeholder="email o @utente GitHub" />
+				</label>
+				<div class="fb-hp" aria-hidden="true"><label>Sito web <input type="text" name="website" tabindex="-1" autocomplete="off" /></label></div>
+				<p class="fb-note">La segnalazione diventa una issue pubblica su GitHub, con il link alla vista attuale della mappa, dimensioni dello schermo e browser. Anche il contatto, se lo lasci, sarà pubblico.</p>
+				<div class="fb-actions">
+					<button type="button" data-close>Annulla</button>
+					<button type="submit" id="feedback-send" class="fb-send">Invia</button>
+				</div>
+				<p id="feedback-status" class="fb-status" role="status" aria-live="polite"></p>
+			</form>
+		</dialog>
 		<div id="zoom" class="ui" role="group" aria-label="Zoom">
 			<button type="button" id="zoom-in" aria-label="Avvicina" title="Avvicina">+</button>
 			<button type="button" id="zoom-out" aria-label="Allontana" title="Allontana">−</button>
@@ -113,7 +141,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			#map { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 			#map { position: fixed; inset: 0; background: #e8e4dc; }
 			/* zoom buttons: bottom right, above the credit line; "−" greys out at the zoom-out limit */
-			#zoom { position: fixed; right: 16px; bottom: 44px; z-index: 3; display: flex; flex-direction: column;
+			#zoom { position: fixed; right: 16px; bottom: calc(var(--credits-h, 32px) + 12px); z-index: 3; display: flex; flex-direction: column;
 				border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(40,35,25,0.18); background: rgba(255,253,248,0.94); }
 			#zoom button { width: 40px; height: 40px; border: 0; background: transparent; color: #3b3630; font: 500 22px/1 ui-sans-serif, system-ui, sans-serif;
 				cursor: pointer; touch-action: manipulation; }
@@ -125,7 +153,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			#ambient-tint, #ambient-wash { position: fixed; inset: 0; z-index: 2; pointer-events: none; opacity: 0; transition: background-color 1.2s linear, opacity 0.6s; }
 			#ambient-tint { mix-blend-mode: multiply; background: #fff; }
 			#ambient-wash { mix-blend-mode: soft-light; }
-			#ambient { position: fixed; left: 16px; bottom: 44px; z-index: 3; max-width: min(300px, calc(100vw - 88px)); padding: 8px 10px;
+			#ambient { position: fixed; left: 16px; bottom: calc(var(--credits-h, 32px) + 12px); z-index: 3; max-width: min(300px, calc(100vw - 88px)); padding: 8px 10px;
 				border-radius: 12px; background: rgba(255,253,248,0.94); box-shadow: 0 2px 10px rgba(40,35,25,0.18); color: #3b3630;
 				font: 13px/1.35 ui-sans-serif, system-ui, sans-serif; }
 			#ambient .row { display: flex; align-items: center; gap: 8px; }
@@ -137,6 +165,38 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			#ambient-clock { font-variant-numeric: tabular-nums; font-weight: 600; color: #3b3630; }
 			#help { margin-top: 6px; border-top: 1px solid rgba(60,50,40,0.12); padding-top: 6px; font-size: 12px; color: #4d463e; }
 			#help p { margin: 0 0 6px; }
+			#ambient #feedback-open { display: block; width: 100%; margin-top: 2px; padding: 6px 8px; color: #fff; background: #b5643f; font-weight: 600; }
+			#ambient #feedback-open:hover { background: #9e5534; }
+			#feedback { width: min(420px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; margin: auto; padding: 14px 16px; border: 0;
+				border-radius: 12px; background: rgba(255,253,248,0.97); color: #3b3630; box-shadow: 0 8px 30px rgba(40,35,25,0.3);
+				font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: auto; }
+			#feedback::backdrop { background: rgba(40,35,25,0.35); }
+			#feedback .fb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+			#feedback h2 { margin: 0; font-size: 15px; font-weight: 600; }
+			#feedback button { border: 0; background: rgba(0,0,0,0.06); color: inherit; border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; touch-action: manipulation; }
+			#feedback button:hover:not(:disabled) { background: rgba(0,0,0,0.1); }
+			#feedback button:focus-visible, #feedback input:focus-visible, #feedback textarea:focus-visible { outline: 2px solid #b5643f; outline-offset: 1px; }
+			#feedback .fb-close { padding: 2px 9px; font-size: 18px; line-height: 1.2; }
+			#feedback .fb-kind { display: flex; gap: 16px; margin: 0 0 8px; padding: 0; border: 0; }
+			#feedback .fb-kind legend { padding: 0; margin-bottom: 4px; color: #4d463e; }
+			#feedback .fb-kind label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+			#feedback input[type=radio] { accent-color: #b5643f; margin: 0; }
+			#feedback .fb-field { display: block; margin-bottom: 8px; color: #4d463e; }
+			#feedback textarea, #feedback input[type=text] { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 7px 8px;
+				border: 1px solid rgba(60,50,40,0.25); border-radius: 8px; background: #fff; color: #3b3630; font: 16px/1.35 ui-sans-serif, system-ui, sans-serif; }
+			#feedback textarea { resize: vertical; min-height: 96px; }
+			#feedback .fb-opt { color: #8a8178; }
+			#feedback .fb-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+			#feedback .fb-note { margin: 0 0 10px; font-size: 11.5px; color: #6b635a; }
+			#feedback .fb-actions { display: flex; justify-content: flex-end; gap: 8px; }
+			#feedback .fb-send { background: #b5643f; color: #fff; font-weight: 600; }
+			#feedback .fb-send:hover:not(:disabled) { background: #9e5534; }
+			#feedback .fb-send:disabled { opacity: 0.6; cursor: default; }
+			#feedback .fb-status { margin: 8px 0 0; min-height: 1em; }
+			#feedback .fb-status:empty { display: none; }
+			#feedback .fb-status.ok { color: #3d6b35; }
+			#feedback .fb-status.error { color: #a1381f; }
+			#feedback .fb-status a { color: #b5643f; font-weight: 600; }
 			#help .keys b { display: inline-block; min-width: 1.2em; text-align: center; border: 1px solid rgba(60,50,40,0.25); border-radius: 4px; padding: 0 3px; }
 			#preview { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; background: #e8e4dc; }
 			/* landscape: the image is 0.8 × as tall as wide; portrait and squarish screens: 2.2 × (export.ts PREVIEWS) */
@@ -169,6 +229,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 
 		<script>
 			import '../scripts/map.ts';
+			import '../scripts/feedback.ts';
 		</script>
 	</body>
 </html>

@@ -428,3 +428,10 @@ document.getElementById("credits")!.innerHTML = [
   `Made by <a href="https://domenicogagliardi.com">Domenico Gagliardi</a>`,
 // each credit stays on one line; the separator rides at the end of the previous one so no line starts with "·"
 ].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ");
+// the panels sit just above the credit line, whatever its height (on a phone it wraps to several lines)
+{
+  const credits = document.getElementById("credits")!;
+  const fit = () => document.documentElement.style.setProperty("--credits-h", `${Math.ceil(credits.getBoundingClientRect().height)}px`);
+  fit();
+  new ResizeObserver(fit).observe(credits);
+}
