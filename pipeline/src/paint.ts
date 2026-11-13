@@ -271,6 +271,9 @@ function codex(cwd: string, prompt: string): Promise<void> {
     const log = openSync(join(cwd, "codex.log"), "w");
     const p = spawn("codex", [
       "exec", "--skip-git-repo-check",
+      // no rollout file per window: each held the four inputs and the result as base64 (~22 MB),
+      // 1.5 GB an hour while painting a city, enough to fill the disk overnight
+      "--ephemeral",
       "-s", "workspace-write",
       "-C", cwd,
       "-i", "input.png", "-i", "height.png", "-i", "style.png", "-i", "trees.png",
