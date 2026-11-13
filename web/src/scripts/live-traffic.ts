@@ -30,7 +30,7 @@ export class LiveTraffic {
   levels: Float32Array | null = null;
   /** time of the TomTom data shown (ISO) */
   at = "";
-  private paths: Array<{ css: string; path: Path2D }> = [];
+  private paths: Array<{ css: string; path: Path2D; flowing: boolean }> = [];
   private ppm: number;
 
   constructor(private roads: Road[], private M: number[][]) {
@@ -109,29 +109,37 @@ export class LiveTraffic {
       const css = lv === 0 ? CLOSED : CLASSES.find((c) => lv < c.max)!.css; // 0 only for a reported closure
       const path = paths.get(css) ?? paths.set(css, new Path2D()).get(css)!;
       const S = r.s, n = S.length / 4;
+      // only where the street is in view, and stopping a sample (≈2 m) short of any cover: the band
+      // never reaches onto a roof or a crown
+      const seen = (k: number) => k < 0 || k >= n || S[k * 4 + 3] === 1;
       let open = false;
       for (let k = 0; k < n; k++) {
-        if (S[k * 4 + 3] !== 1) { open = false; continue; }
+        if (!seen(k) || !seen(k - 1) || !seen(k + 1)) { open = false; continue; }
         const x = M[0][0] * S[k * 4] + M[0][1] * S[k * 4 + 1] + M[0][2] * S[k * 4 + 2];
         const y = M[1][0] * S[k * 4] + M[1][1] * S[k * 4 + 1] + M[1][2] * S[k * 4 + 2];
         if (open) path.lineTo(x, y); else { path.moveTo(x, y); open = true; }
       }
     });
     // draw order: flowing first, queues on top
-    this.paths = [...CLASSES.map((c) => c.css).reverse(), CLOSED].filter((css) => paths.has(css)).map((css) => ({ css, path: paths.get(css)! }));
+    this.paths = [...CLASSES.map((c) => c.css).reverse(), CLOSED].filter((css) => paths.has(css))
+      .map((css) => ({ css, path: paths.get(css)!, flowing: css === CLASSES[CLASSES.length - 1].css }));
   }
 
   /** coloured roads on the map overlay; k, tx, ty: canvas px = art px × k + t */
   draw(ctx: CanvasRenderingContext2D, k: number, tx: number, ty: number) {
     if (!this.paths.length) return;
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max((2.4 * dpr) / k, 2.6 * this.ppm); // ≥ 2.4 css px, else 2.6 m of the carriageway
+    // a band of light along the middle of the carriageway, in metres (thin from afar, never wider
+    // than a lane): flowing streets barely tinted, slow ones and queues clearly marked
+    const w = (m: number, minCss: number) => Math.max((minCss * dpr) / k, m * this.ppm);
     ctx.save();
     ctx.setTransform(k, 0, 0, k, tx, ty);
-    ctx.lineCap = "round"; ctx.lineJoin = "round";
-    for (const { css, path } of this.paths) {
-      ctx.globalAlpha = 0.35; ctx.strokeStyle = "#1b1b1b"; ctx.lineWidth = width * 1.6; ctx.stroke(path); // soft dark edge
-      ctx.globalAlpha = 0.9; ctx.strokeStyle = css; ctx.lineWidth = width; ctx.stroke(path);
+    ctx.lineCap = "butt"; ctx.lineJoin = "round";
+    for (const { css, path, flowing } of this.paths) {
+      const core = flowing ? w(1.1, 1.2) : w(2.0, 2);
+      ctx.strokeStyle = css;
+      ctx.globalAlpha = flowing ? 0.1 : 0.22; ctx.lineWidth = core * 2.4; ctx.stroke(path); // soft halo
+      ctx.globalAlpha = flowing ? 0.5 : 0.92; ctx.lineWidth = core; ctx.stroke(path);
     }
     ctx.restore();
   }
