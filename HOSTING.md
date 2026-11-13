@@ -42,8 +42,15 @@ I deploy automatici Git sono abilitati (`git.deploymentEnabled: true` in `vercel
 ogni push su un branch collegato crea un deployment Vercel. Le tile restano su R2 e
 richiedono comunque `npm run publish` separato.
 
-Il Worker Cloudflare resta un backup: `npm run deploy` pubblica quel Worker,
-**non** il sito Vercel, e non va usato nel rilascio Roma descritto qui.
+`npm run deploy` pubblica il sito su **Vercel** in produzione (`vercel deploy --prod`), come il push su
+`main`. Il Worker Cloudflare (`worker/`, `wrangler.jsonc`) resta solo come backup e non è più il percorso
+di rilascio.
+
+Funzioni Vercel (`api/`), variabili d'ambiente del progetto Vercel:
+- `api/p.ts`: proxy statistiche Pirsch su `/p/*` (riscrittura in `vercel.json`), `PIRSCH_ACCESS_KEY`.
+- `api/feedback.ts`: il pulsante "Segnala un problema o un'idea" crea una issue su GitHub con etichette
+  `feedback` + `bug`/`idea`, `GITHUB_TOKEN` (fine-grained, solo questo repository, Issues: read and write).
+  Senza token la pagina apre `issues/new` già compilata.
 
 ## 4. DNS
 

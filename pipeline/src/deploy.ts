@@ -1,11 +1,11 @@
 /**
- * Deploy the built site (web/dist) to Cloudflare Workers on the custom domain SITE_DOMAIN (.env).
- * Outward-facing: run only when you mean to update the live site. `npm run deploy` builds first.
+ * Deploy the built site (web/dist + the api/ functions) to Vercel production. Outward-facing: run only
+ * when you mean to update the live site. `npm run deploy` builds first. Map tiles and region data are
+ * not part of it: they live on R2 (`npm run publish`, pipeline/src/hosting.ts), publish them first.
+ * Vercel also deploys production by itself on every push to main (vercel.json git.deploymentEnabled).
  */
 import { spawnSync } from "node:child_process";
 import { ROOT } from "./paths.ts";
 
-const domain = process.env.SITE_DOMAIN;
-if (!domain) throw new Error("SITE_DOMAIN is not set: add it to .env (see .env.example)");
-const r = spawnSync("npx", ["wrangler", "deploy", "--domain", domain], { cwd: ROOT, stdio: "inherit" });
+const r = spawnSync("vercel", ["deploy", "--prod", "--yes"], { cwd: ROOT, stdio: "inherit" });
 process.exit(r.status ?? 1);
