@@ -143,9 +143,17 @@ export function startAmbient(): Ambient {
   const minutes: number | null = fixed ? Number(fixed[1]) * 60 + Number(fixed[2]) : null; // null = live
   let weather: Weather | null = null;
 
+  // one formatter, read at most once a second: the traffic asks for the hour per bus per frame, and a
+  // new Intl.DateTimeFormat each time was a fifth of the frame
+  const romeFmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", hour12: false });
+  let romeAt = -Infinity, romeMin = 0;
   const romeNow = () => {
-    const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
-    return Number(p.find((x) => x.type === "hour")!.value) * 60 + Number(p.find((x) => x.type === "minute")!.value);
+    const now = Date.now();
+    if (now - romeAt < 1000) return romeMin;
+    const p = romeFmt.formatToParts(new Date(now));
+    romeAt = now;
+    romeMin = Number(p.find((x) => x.type === "hour")!.value) * 60 + Number(p.find((x) => x.type === "minute")!.value);
+    return romeMin;
   };
   /** the instant whose Rome wall-clock time is `m` minutes today (for the sun position) */
   const dateAt = (m: number) => new Date(Date.now() + (m - romeNow()) * 60_000);

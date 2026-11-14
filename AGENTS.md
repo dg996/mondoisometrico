@@ -117,7 +117,7 @@ npm run deploy                                 # after every publish: pages bake
 ### 6. Check
 
 - Open `http://localhost:<port>/<city-slug>` (the dev server prints the port): centred on the city, no console errors, borders (`B`), traffic,
-  credits correct. `?at=lat,lon,km` and `#metro` work.
+  credits correct. `?at=lat,lon,km` and `#@x,y,zoom` links work.
 - `npm -w pipeline exec tsx src/tour.ts` (adapt its PLACES) for screenshots; look at them.
 - Typecheck: `cd pipeline && ../node_modules/.bin/tsc --noEmit -p .` and the same in `web/`.
 
