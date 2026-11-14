@@ -57,6 +57,8 @@ interface Vehicle {
   tw?: number;
   /** drawn cover opacity, eased toward the geometric clearance (no pop at a way change), and when */
   ca?: number; caT?: number;
+  /** body rear / front on its lane (ENU) where it last was, reused while it has not moved */
+  foot?: { w: number; s: number; dir: 1 | -1; lane: number; lat0?: number; a: [number, number]; b: [number, number] };
 }
 
 const CLASS_WEIGHT = [3, 2.6, 2, 1.4, 0.35, 0.05];
@@ -348,8 +350,12 @@ export class Traffic {
    *  a vehicle must not drop it onto one queued just across a node). */
   private spotFree(w: number, dir: 1 | -1, s: number, len: number, self?: Vehicle) {
     const [x, y] = this.pointAt(w, dir, s), u = this.ways[w].r.s[2];
+    const B = this.wayBoxes();
     for (const o of this.vehicles) {
       if (o === self || o.off) continue;
+      // a vehicle whose whole way is out of reach cannot be near (exact, and spares a walk along it)
+      const R = (o.len + len) / 2 + 2 * GAP, b = o.w * 6;
+      if (x < B[b] - R || x > B[b + 3] + R || y < B[b + 1] - R || y > B[b + 4] + R) continue;
       const [ox, oy] = this.pointAt(o.w, o.dir, o.s);
       if (Math.hypot(ox - x, oy - y) < (o.len + len) / 2 + 2 * GAP && Math.abs(this.ways[o.w].r.s[2] - u) < 6) return false;
     }
@@ -482,6 +488,51 @@ export class Traffic {
       if (out && way.r.c <= 4 && way.len > 25) ring.push(w);
     });
     this.near = near; this.ring = ring; this.nearWeight = weight;
+  }
+
+  /** ways whose vehicles move this frame: every way reaching within a screen of the view (its whole
+   *  extent, not only its midpoint, so a long avenue crossing the view always drives). Vehicles
+   *  farther away wait where they are, like all of them do when zoomed out: nobody sees them, and
+   *  stepping the whole city's 4,000 every frame made the map slower the more you zoomed in. Before
+   *  the first view (warm-up) every way is active. */
+  private active: Uint8Array | null = null;
+  private activeT = -1e9;
+  private boxes: Float64Array | null = null;
+  /** ENU extent of each way's samples: [e0, n0, u0, e1, n1, u1] × ways */
+  private wayBoxes() {
+    if (this.boxes) return this.boxes;
+    const B = (this.boxes = new Float64Array(this.ways.length * 6));
+    this.ways.forEach((way, w) => {
+      const S = way.r.s;
+      let e0 = Infinity, n0 = Infinity, u0 = Infinity, e1 = -Infinity, n1 = -Infinity, u1 = -Infinity;
+      for (let i = 0; i < way.n; i++) {
+        const e = S[i * 4], n = S[i * 4 + 1], u = S[i * 4 + 2];
+        e0 = Math.min(e0, e); e1 = Math.max(e1, e); n0 = Math.min(n0, n); n1 = Math.max(n1, n); u0 = Math.min(u0, u); u1 = Math.max(u1, u);
+      }
+      B.set([e0, n0, u0, e1, n1, u1], w * 6);
+    });
+    return B;
+  }
+  private findActive(proj: (p: Vec3) => [number, number], [vx0, vy0, vx1, vy1]: [number, number, number, number]) {
+    this.activeT = this.t;
+    // the camera is affine: screen = O + E·e + N·n + U·u, so a box's screen extent is exact per axis
+    const O = proj([0, 0, 0]), E = proj([1, 0, 0]), N = proj([0, 1, 0]), U = proj([0, 0, 1]);
+    const ax = [E[0] - O[0], N[0] - O[0], U[0] - O[0]], ay = [E[1] - O[1], N[1] - O[1], U[1] - O[1]];
+    const mx = vx1 - vx0, my = vy1 - vy0;
+    const X0 = vx0 - mx, X1 = vx1 + mx, Y0 = vy0 - my, Y1 = vy1 + my;
+    const active = this.active && this.active.length === this.ways.length ? this.active : new Uint8Array(this.ways.length);
+    const B = this.wayBoxes();
+    for (let w = 0; w < this.ways.length; w++) {
+      const b = w * 6;
+      let x0 = O[0], x1 = O[0], y0 = O[1], y1 = O[1];
+      for (let c = 0; c < 3; c++) {
+        const lo = B[b + c], hi = B[b + 3 + c];
+        const p = ax[c] * lo, q = ax[c] * hi, r = ay[c] * lo, s = ay[c] * hi;
+        x0 += Math.min(p, q); x1 += Math.max(p, q); y0 += Math.min(r, s); y1 += Math.max(r, s);
+      }
+      active[w] = x1 >= X0 && x0 <= X1 && y1 >= Y0 && y0 <= Y1 ? 1 : 0;
+    }
+    this.active = active;
   }
 
   /** Keep the visitor's surroundings busy: move cars that are far from the view (unseen there) onto
@@ -737,23 +788,33 @@ export class Traffic {
    *  diverging, a crossing the lane logic does not see. Checked only near way ends (cheap). */
   private blockedAhead() {
     this.feet = []; this.feetOf = [];
-    const CELL = 20, grid = new Map<string, Array<{ v: Vehicle; a: [number, number]; b: [number, number] }>>();
+    // 20 m cells keyed by number (cx, cy within ±2^15 cells = ±650 km): no string per vehicle per frame
+    const CELL = 20, key = (cx: number, cy: number) => (cx + 32768) * 65536 + (cy + 32768);
+    const grid = new Map<number, Array<{ v: Vehicle; a: [number, number]; b: [number, number] }>>();
     for (const v of this.vehicles) {
       if (v.off) continue;
       // rear and front where the body is drawn: on its lane, not on the way's centre line
-      const a0 = this.pointAt(v.w, v.dir, v.s - v.len / 2), b0 = this.pointAt(v.w, v.dir, v.s + v.len / 2);
-      const L0 = Math.hypot(b0[0] - a0[0], b0[1] - a0[1]) || 1, off = this.offset(this.ways[v.w], v);
-      const nx = ((b0[1] - a0[1]) / L0) * off, ny = (-(b0[0] - a0[0]) / L0) * off;
-      const a: [number, number] = [a0[0] + nx, a0[1] + ny], b: [number, number] = [b0[0] + nx, b0[1] + ny];
+      // (kept from the last step while the vehicle has not moved: most wait at lights or far away)
+      const f = v.foot;
+      let a: [number, number], b: [number, number];
+      if (f && f.w === v.w && f.s === v.s && f.dir === v.dir && f.lane === v.lane && f.lat0 === v.lat0) ({ a, b } = f);
+      else {
+        const a0 = this.pointAt(v.w, v.dir, v.s - v.len / 2), b0 = this.pointAt(v.w, v.dir, v.s + v.len / 2);
+        const L0 = Math.hypot(b0[0] - a0[0], b0[1] - a0[1]) || 1, off = this.offset(this.ways[v.w], v);
+        const nx = ((b0[1] - a0[1]) / L0) * off, ny = (-(b0[0] - a0[0]) / L0) * off;
+        a = [a0[0] + nx, a0[1] + ny]; b = [b0[0] + nx, b0[1] + ny];
+        v.foot = { w: v.w, s: v.s, dir: v.dir, lane: v.lane, lat0: v.lat0, a, b };
+      }
       this.feet.push([a[0], a[1], b[0], b[1], v.wid / 2]); this.feetOf.push(v);
-      const k = `${Math.floor((a[0] + b[0]) / 2 / CELL)}_${Math.floor((a[1] + b[1]) / 2 / CELL)}`;
+      const k = key(Math.floor((a[0] + b[0]) / 2 / CELL), Math.floor((a[1] + b[1]) / 2 / CELL));
       (grid.get(k) ?? grid.set(k, []).get(k)!).push({ v, a, b });
     }
-    const out = new Set<Vehicle>();
+    const out = new Set<Vehicle>(), active = this.active;
     for (const [k, list] of grid) {
-      const [cx, cy] = k.split("_").map(Number);
+      const cx = Math.floor(k / 65536) - 32768, cy = (k % 65536) - 32768;
       for (const me of list) {
         const v = me.v;
+        if (active && !active[v.w]) continue; // waiting far from the view: not stepped, nothing to check
         if (this.ways[v.w].len - (v.s + v.len / 2) > 20 && v.s - v.len / 2 > 20) continue; // mid-way: lanes handle it
         const dx = me.b[0] - me.a[0], dy = me.b[1] - me.a[1], L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
         // nose and both front corners, a little ahead: a merge brings bodies together corner first
@@ -762,7 +823,7 @@ export class Traffic {
           [me.b[0] + ux * 0.6 + uy * hw, me.b[1] + uy * 0.6 - ux * hw, 0],
           [me.b[0] + ux * 0.6 - uy * hw, me.b[1] + uy * 0.6 + ux * hw, 0],
         ];
-        for (let i = -1; i <= 1 && !out.has(v); i++) for (let j = -1; j <= 1; j++) for (const o of grid.get(`${cx + i}_${cy + j}`) ?? []) {
+        for (let i = -1; i <= 1 && !out.has(v); i++) for (let j = -1; j <= 1; j++) for (const o of grid.get(key(cx + i, cy + j)) ?? []) {
           if (o.v === v || Math.abs(this.ways[o.v.w].r.s[2] - this.ways[v.w].r.s[2]) > 6) continue;
           const ox = o.b[0] - o.a[0], oy = o.b[1] - o.a[1], OL = Math.hypot(ox, oy) || 1;
           if ((ox * dx + oy * dy) / (OL * L) < -0.5) continue; // oncoming: passes alongside
@@ -799,7 +860,9 @@ export class Traffic {
     // tram cars in a 30 m grid: only the few vehicles near a tram are tested
     const grid = new Map<string, number[][]>();
     for (const sg of segs) { const k = `${Math.floor((sg[0] + sg[2]) / 60)}_${Math.floor((sg[1] + sg[3]) / 60)}`; (grid.get(k) ?? grid.set(k, []).get(k)!).push(sg); }
+    const active = this.active;
     for (let f = 0; f < this.feet.length; f++) {
+      if (active && !active[this.feetOf[f].w]) continue; // waiting far from the view: not stepped
       const [ax, ay, bx, by, hw] = this.feet[f], cx = Math.floor(bx / 30), cy = Math.floor(by / 30);
       let near: number[][] | null = null;
       for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) { const g = grid.get(`${cx + i}_${cy + j}`); if (g) (near ??= []).push(...g); }
@@ -820,7 +883,9 @@ export class Traffic {
     this.regroup();
     const blocked = this.blockedAhead();
     const tramBlocked = this.blockedByTrams();
+    const active = this.active;
     for (const g of this.lanes.values()) {
+      if (active && g.length && !active[g[0].w]) continue; // far from the view: waits (findActive)
       for (let k = 0; k < g.length; k++) {
         const v = g[k], way = this.ways[v.w];
         if (v.next === null) v.next = this.chooseNext(v);
@@ -1086,7 +1151,7 @@ export class Traffic {
   draw(ctx: CanvasRenderingContext2D, toScreen: (x: number, y: number) => [number, number], px: number, view: [number, number, number, number]) {
     this.drawn = 0;
     this.lit = [];
-    if (px < 0.28) { this.onScreen = null; this.near = null; return; } // only when asphalt is clearly readable — no fleas on roofs at mid zoom
+    if (px < 0.28) { this.onScreen = null; this.near = null; this.activeT = -1e9; return; } // only when asphalt is clearly readable — no fleas on roofs at mid zoom
     const [vx0, vy0, vx1, vy1] = view;
     const M = this.enu2px;
     const proj = (p: Vec3): [number, number] =>
@@ -1107,6 +1172,7 @@ export class Traffic {
       return false;
     };
     if (this.t - this.nearT > 1) this.findNear(proj, view);
+    if (this.t - this.activeT > 0.2) this.findActive(proj, view); // a fast pan never outruns it (a screen of margin)
     const items: Array<{ v: Vehicle; c: Vec3; d: [number, number]; a: number; depth: number }> = [];
     for (const v of this.vehicles) {
       const way = this.ways[v.w], S = way.r.s;
@@ -1117,6 +1183,18 @@ export class Traffic {
         return { i, s };
       };
       if (v.off || (v.line >= 0 && !this.lineRuns(v.line))) continue; // night lines by night, day lines by day
+      // where it is first: off screen it is skipped before the cover checks below (those were most of
+      // the frame for the whole city's vehicles); their easing is time-based, so a vehicle coming into
+      // view picks up where it would have been
+      const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
+      const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
+      let dx = S[k1] - S[k0], dy = S[k1 + 1] - S[k0 + 1];
+      const L = Math.hypot(dx, dy) || 1;
+      dx = (dx / L) * v.dir; dy = (dy / L) * v.dir;
+      const off = this.offset(way, v);
+      const c: Vec3 = [S[k0] + (S[k1] - S[k0]) * f + dy * off, S[k0 + 1] + (S[k1 + 1] - S[k0 + 1]) * f - dx * off, S[k0 + 2] + (S[k1 + 2] - S[k0 + 2]) * f];
+      const [sx, sy] = proj(c);
+      if (sx < vx0 - 40 || sy < vy0 - 40 || sx > vx1 + 40 || sy > vy1 + 40) continue;
       // behind a building / under a crown: fades out approaching the cover, back in after it
       // cover ahead (also where the next way starts under it): fades out geometrically, never drawn
       // over the cover; coming out of it (or onto a way from one) fades in over ≈0.25 s
@@ -1133,16 +1211,9 @@ export class Traffic {
       v.ca = v.ca === undefined || target <= v.ca ? target : v.ca + (target - v.ca) * kc;
       const clear = v.ca;
       if (clear < 0.02) continue;
-      const { i, s } = at(v.s), k0 = (i - 1) * 4, k1 = i * 4;
-      const f = (s - way.cum[i - 1]) / Math.max(1e-3, way.cum[i] - way.cum[i - 1]);
-      let dx = S[k1] - S[k0], dy = S[k1 + 1] - S[k0 + 1];
-      const L = Math.hypot(dx, dy) || 1;
-      dx = (dx / L) * v.dir; dy = (dy / L) * v.dir;
       // Reject wild vertical jumps (broken DEM / tunnel mouths) that float cars above the street
       const du = Math.abs(S[k1 + 2] - S[k0 + 2]);
       if (du > 2.2) continue;
-      const off = this.offset(way, v);
-      const c: Vec3 = [S[k0] + (S[k1] - S[k0]) * f + dy * off, S[k0 + 1] + (S[k1 + 1] - S[k0 + 1]) * f - dx * off, S[k0 + 2] + (S[k1 + 2] - S[k0 + 2]) * f];
       // Reject cars sitting in a river trough: well below the straight grade between the way's two
       // ends (a plain slope — most of Rome is on hills — is not a trough)
       const band = Math.max(1, Math.floor(way.n * 0.2));
@@ -1173,8 +1244,6 @@ export class Traffic {
         const hx = v.hd[0] + (dx - v.hd[0]) * k, hy = v.hd[1] + (dy - v.hd[1]) * k, hl = Math.hypot(hx, hy) || 1;
         v.hd = [hx / hl, hy / hl];
       } else v.hd = [dx, dy];
-      const [sx, sy] = proj(c);
-      if (sx < vx0 - 40 || sy < vy0 - 40 || sx > vx1 + 40 || sy > vy1 + 40) continue;
       if (tramSegs.length && underTram(c, v.hd, v.len, v.wid)) continue;
       items.push({ v, c, d: v.hd, a: alpha, depth: c[0] * this.camFwd[0] + c[1] * this.camFwd[1] });
     }

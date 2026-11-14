@@ -32,7 +32,7 @@ const site = Astro.site ?? Astro.url;
 const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, ogImage = new URL(`/og/${home ? "index" : city}.jpg`, site).href;
 ---
 
-<html lang="en">
+<html lang="it">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" href="/favicon.ico" sizes="48x48" />
@@ -81,8 +81,8 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			</div>
 		)}
 		<script is:inline>
-			// a deep link (#@x,y,z, #metro, ?at=) opens somewhere else: no preview
-			if (/^#(@|metro)/.test(location.hash) || new URLSearchParams(location.search).has("at")) document.getElementById("preview")?.remove();
+			// a deep link (#@x,y,z, ?at=) opens somewhere else: no preview
+			if (/^#@/.test(location.hash) || new URLSearchParams(location.search).has("at")) document.getElementById("preview")?.remove();
 		</script>
 		<!-- light of the hour and weather over the tiles (ambient.ts): multiply tint + soft wash, never repainting -->
 		<div id="ambient-tint" aria-hidden="true"></div>

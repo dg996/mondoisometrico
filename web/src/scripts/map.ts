@@ -373,7 +373,6 @@ if (preview) {
 // Opening view, first match wins:
 //   #@x,y,zoom          deep link (global art px, viewer zoom), kept up to date while you pan
 //   ?at=lat,lon[,km]    a place, with the screen width in km (default 1.5)
-//   #metro              the whole region with borders
 //   otherwise           the page's city (centre + width from places.ts)
 /** Ready-map rectangle in global art px (painted tiles, else city opening frame). */
 let playableRect: [[number, number], [number, number]] | null = null;
