@@ -11,10 +11,11 @@
  *   npm run paint -- tlv-core --window=4,-3     # use = form so negatives aren't flags
  *   npm run paint -- tlv-core --near 32.064,34.775 --radius 2   # a patch of windows
  *   npm run paint -- tlv-core -j 3                              # everything, centre first (--center lat,lon)
+ *   npm run paint -- roma-inner --windows=11_2,12_-4            # repaint exactly these (old paintings kept in windows-replaced/)
  */
 import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { windowPalette, applyPalette } from "./palette.ts";
 import { parseArgs } from "node:util";
 import sharp, { type OverlayOptions } from "sharp";
@@ -24,6 +25,8 @@ import { CAMERA, llhToPixel, enuToPixel } from "./camera.ts";
 import { landmarkProjector } from "./landmark-anchors.ts";
 import { LANDMARKS } from "./landmarks.ts";
 import { DERIVED, PIPELINE, readJson, writeAtomic } from "./paths.ts";
+import { WALL_STYLE } from "./city-walls.ts";
+import { groundAt, type TerrainMeta } from "./road-safety.ts";
 import { SEA_H, readHeights } from "./heights.ts";
 import { applyRegistration, register, type Registration } from "./register.ts";
 
@@ -108,6 +111,10 @@ const { values: args, positionals } = parseArgs({
   options: {
     plan: { type: "boolean", default: false },
     window: { type: "string" },
+    // comma-separated i_j list: repaint exactly these windows (checkerboard order), then assemble once
+    windows: { type: "string" },
+    // with --windows: leave assembly (every art tile, ~1 h) for a later `--assemble` (test patches, batches)
+    "skip-assemble": { type: "boolean", default: false },
     near: { type: "string" },
     context: { type: "string" }, // comma-separated adjacent areas; share global paint windows and palette
     "art-bounds": { type: "string" }, // x0,y0,x1,y1 global art px: paint only the release rectangle
@@ -130,8 +137,12 @@ openArea(areaName);
 const projectLandmark = landmarkProjector([areaName]);
 const OLDER = args.older ? new Date(args.older).getTime() : 0;
 const mtime = (f: string) => (existsSync(f) ? statSync(f).mtimeMs : 0);
+/** --windows: repainted in this run whatever is on disk; until then their old art is not continued */
+const REPAINT = new Set((args.windows ?? "").split(",").map((s) => s.trim()).filter((s) => /^-?\d+_-?\d+$/.test(s)));
+const RUN_START = Date.now();
 /** painted in the current style (with --older, windows painted before the cut-off don't count) */
-const current = (i: number, j: number) => existsSync(winFile(i, j)) && mtime(winFile(i, j)) >= OLDER;
+const current = (i: number, j: number) => existsSync(winFile(i, j)) && mtime(winFile(i, j)) >= OLDER
+  && !(REPAINT.has(`${i}_${j}`) && mtime(winFile(i, j)) < RUN_START);
 let tileSet = new Set<string>(manifest.tiles.map((t: any) => `${t.x}_${t.y}`));
 if (args["art-bounds"]) {
   const b = parseArtBounds(args["art-bounds"]);
@@ -440,6 +451,41 @@ function landmarksInWindow(i: number, j: number): string[] {
   return hints;
 }
 
+/** City walls (city-walls.ts) drawn in the render of this window: the render's brick bands are walls, not houses. */
+const WALL_HINT = "City walls: the long narrow brick-red bands with flat tops are the ancient Roman Aurelian Walls (Mura Aureliane), "
+  + "about 13 m high and 3.5 m thick. Paint them as one continuous curtain of weathered orange-brown Roman brick with a "
+  + "crenellated wall-walk on top, square brick towers where the band juts out, ivy and grass at the foot. NO windows, NO doors, "
+  + "NO roofs: never a row of houses or palazzi. Where a road passes through the band draw an arched opening. Keep the wall "
+  + "exactly where, as long and as thick as the render draws it; do not extend it past where it ends.";
+let terrain: { meta: TerrainMeta; values: Float32Array } | null | undefined;
+function wallsInWindow(i: number, j: number): boolean {
+  if (terrain === undefined) {
+    const dir = join(base, "ground");
+    terrain = existsSync(join(dir, "height.bin")) ? (() => {
+      const b = readFileSync(join(dir, "height.bin"));
+      return { meta: readJson<TerrainMeta>(join(dir, "meta.json")), values: new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)) };
+    })() : null;
+  }
+  const x0 = i * STRIDE, y0 = j * STRIDE;
+  for (let ty = Math.floor(y0 / T); ty <= Math.floor((y0 + WIN - 1) / T); ty++)
+    for (let tx = Math.floor(x0 / T); tx <= Math.floor((x0 + WIN - 1) / T); tx++) {
+      const f = join(base, "scene", `${tx}_${ty}.json`);
+      if (!existsSync(f)) continue;
+      for (const [ring, h, s] of (readJson(f) as { b: Array<[Array<[number, number]>, number, number]> }).b) {
+        if (s !== WALL_STYLE) continue;
+        // foot and top of every vertex on the real ground (without terrain: anywhere 20–60 m MSL)
+        for (const [x, y] of ring) {
+          const g = terrain ? groundAt(terrain.meta, terrain.values, x, y) : null;
+          for (const z of g === null ? [SEA_H + 20, SEA_H + 60 + h] : [g, g + h]) {
+            const [px, py] = enuToPixel([x, y, z]);
+            if (px >= x0 && px < x0 + WIN && py >= y0 && py < y0 + WIN) return true;
+          }
+        }
+      }
+    }
+  return false;
+}
+
 async function paintWindow(i: number, j: number) {
   // the /tmp sandbox keeps ~14 MB of copies per window (inputs, result, log): removed whatever the
   // outcome, or a night of painting fills the disk (it did on 13 November, 8 GB by 06:29)
@@ -448,8 +494,9 @@ async function paintWindow(i: number, j: number) {
 }
 
 async function paintWindowIn(i: number, j: number) {
+  const force = args.force || REPAINT.has(`${i}_${j}`);
   const skipFile = join(base, "paint-skip.json");
-  if (existsSync(skipFile) && !args.force) {
+  if (existsSync(skipFile) && !force) {
     try {
       const skip = JSON.parse(readFileSync(skipFile, "utf8")) as string[];
       if (Array.isArray(skip) && skip.includes(`${i}_${j}`)) {
@@ -463,7 +510,7 @@ async function paintWindowIn(i: number, j: number) {
   // .soft windows were soft-accepted below MIN_MATCH: repaint them on later runs, but cap the
   // repaints — stubborn windows (score plateaus below MIN_MATCH) must not burn 3 generations per
   // pass forever. `--force` or deleting the .soft marker still forces a full repaint.
-  if (existsSync(winFile(i, j)) && !args.force && !(OLDER && !current(i, j))) {
+  if (existsSync(winFile(i, j)) && !force && !(OLDER && !current(i, j))) {
     const sf = `${localExisting(i, j)}.soft`;
     if (!existsSync(sf)) return;
     try {
@@ -493,7 +540,7 @@ async function paintWindowIn(i: number, j: number) {
   for (const f of ["input.png", "height.png", "style.png", "trees.png"] as const)
     copyFileSync(join(sand, f), join(work, f));
   const outSand = join(sand, "out.png");
-  const hints = landmarksInWindow(i, j);
+  const hints = [...landmarksInWindow(i, j), ...(wallsInWindow(i, j) ? [WALL_HINT] : [])];
   const landmarkBlock = hints.length
     ? `\nLANDMARKS IN THIS WINDOW (paint these as the REAL monuments — footprint stays exact):\n- ${hints.join("\n- ")}\n`
     : "";
@@ -723,12 +770,32 @@ async function main() {
     wins = wins.filter(([i, j]) => Math.abs(i - ci) <= r && Math.abs(j - cj) <= r);
   }
   if (args.window) wins = [args.window.split(",").map(Number) as [number, number]];
+  if (REPAINT.size) wins = [...REPAINT].map((k) => k.split("_").map(Number) as [number, number]);
   if (OLDER) { // only land windows (sea-texture windows have no trees) painted before the cut-off
     const old: Array<[number, number]> = [];
     for (const [i, j] of wins) if (existsSync(winFile(i, j)) && !current(i, j) && !(await looksLikeSea(winFile(i, j)))) old.push([i, j]);
     wins = old;
   }
   if (args.plan) return console.log(`${wins.length} windows`);
+  if (REPAINT.size) {
+    // a repaint replaces paintings that took hours to generate: keep a copy of each one first
+    const keep = join(base, "windows-replaced", new Date(RUN_START).toISOString().replace(/[:.]/g, "-"));
+    mkdirSync(keep, { recursive: true });
+    for (const [i, j] of wins)
+      for (const f of windowCandidates(winDir, i, j).flatMap((w) => [w, `${w}.soft`])) if (existsSync(f)) copyFileSync(f, join(keep, basename(f)));
+    console.log(`${wins.length} windows to repaint; the paintings they replace are kept in ${keep}`);
+    // checkerboard: no two windows sharing an edge are painted at once, so the second pass continues the first
+    const failed: string[] = [];
+    for (const pass of [0, 1])
+      await pool(wins.filter(([i, j]) => ((i + j) & 1) === pass), Number(args.j), async ([i, j]) => {
+        try { await paintWindow(i, j); }
+        catch (err) { failed.push(`${i}_${j}`); console.error(`  ${i}_${j}: ${err instanceof Error ? err.message : err}`); }
+      });
+    if (!args["skip-assemble"]) await assemble(true, process.env.MONDO_SOFT_PALETTE !== "1");
+    else console.log("  not assembled (--skip-assemble): run npm run paint -- " + areaName + " --assemble before exporting");
+    if (failed.length) throw new Error(`paint failed QA for ${failed.length} windows (${failed.join(", ")}); their previous paintings are retained`);
+    return;
+  }
   // MONDO_SOFT_PALETTE=1: preview/partial batches may assemble despite seam residuals (not for final publish).
   if (args.assemble) { /* palette QA in assemble covers water and land together */ return assemble(true, process.env.MONDO_SOFT_PALETTE !== "1"); }
   // single-window mode: paint just that cell and assemble once (no 9000 empty rings)

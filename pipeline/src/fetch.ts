@@ -188,6 +188,13 @@ if (!existsSync(join(dir, "trees.json"))) {
   writeFileSync(join(dir, "trees.json"), JSON.stringify(data));
   console.log(`  tree rows + woodland: ${data.elements.length} elements`);
 }
+// City walls: OSM draws most of the Mura Aureliane as barrier=city_wall lines (not buildings) and some
+// gates (Porta Ardeatina) as nodes. Separate file, so an existing osm.json cache stays valid.
+if (!existsSync(join(dir, "walls.json"))) {
+  const data = await overpassGrid(`${name}-walls`, (b) => `[out:json][timeout:120];(way["barrier"="city_wall"]${b};nwr["historic"="city_gate"]${b};);out body geom;`, area.bbox);
+  writeFileSync(join(dir, "walls.json"), JSON.stringify(data));
+  console.log(`  city walls + gates: ${data.elements.length} elements`);
+}
 if (!existsSync(join(dir,"building-parts.json"))) {
   const data=await overpassGrid(`${name}-building-parts`, (b) => `[out:json][timeout:120];(way["building:part"]["building:part"!="no"]${b};relation["building:part"]["building:part"!="no"]${b};);out body geom;`, area.bbox);
   writeFileSync(join(dir,"building-parts.json"),JSON.stringify(data));

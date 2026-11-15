@@ -41,5 +41,10 @@ npm run publish -- roma-centro   # solo con conferma esplicita
 npm run deploy                   # Vercel produzione, solo dopo il publish R2
 ```
 
+Rifare solo una parte: `npm run render -- roma-inner --tiles=7_0,8_-1` e
+`npm run paint -- roma-inner --windows=11_1,12_-4 [--skip-assemble]` ri-generano esattamente quelle tile /
+finestre e conservano le versioni sostituite in `render-replaced/` e `windows-replaced/`
+(esempio completo: [mura-aureliane.md](mura-aureliane.md)).
+
 Controlli: `node --import tsx pipeline/src/traffic-overlap-audit.ts 15` (traffico e strisce),
 `node --import tsx pipeline/src/landmark-audit.ts roma-inner` (monumenti contro OSM e Wikidata).
