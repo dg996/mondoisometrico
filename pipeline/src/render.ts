@@ -4,13 +4,14 @@
  *
  *   npm run render -- tlv-core            # all tiles of an area
  *   npm run render -- tlv-core --only 0,5 # a single tile
+ *   npm run render -- roma-inner --tiles=7_0,8_-1   # re-render exactly these (old ones kept in render-replaced/)
  *   npm run render -- tlv-core -j 4       # parallel browser pages
  *
  * Output: data/derived/<area>/render/<tx>_<ty>.png  (1024² colour)
  *         data/derived/<area>/height/<tx>_<ty>.png  (256², ellipsoid height cm+10000 in R<<8|G)
  *         data/derived/<area>/manifest.json
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import * as esbuild from "esbuild";
@@ -25,6 +26,7 @@ const { values: args, positionals } = parseArgs({
   options: {
     j: { type: "string", default: "3" },
     only: { type: "string" },
+    tiles: { type: "string" }, // comma-separated tx_ty list, always re-rendered
     force: { type: "boolean", default: false },
     ss: { type: "string", default: "2" },
     markers: { type: "string", default: "" },
@@ -99,7 +101,18 @@ async function main() {
   let tiles = areaTiles(area.bbox);
   const all = tiles;
   if (args.only) tiles = [args.only.split(",").map(Number) as [number, number]];
-  const todo = tiles.filter(([x, y]) => args.force || !existsSync(join(outDir, "render", `${x}_${y}.png`)));
+  const listed = (args.tiles ?? "").split(",").map((s) => s.trim()).filter((s) => /^-?\d+_-?\d+$/.test(s));
+  if (listed.length) {
+    tiles = listed.map((k) => k.split("_").map(Number) as [number, number]);
+    // the paintings were made from these renders: keep them
+    const keep = join(outDir, "render-replaced", new Date().toISOString().replace(/[:.]/g, "-"));
+    for (const d of ["render", "height"]) {
+      mkdirSync(join(keep, d), { recursive: true });
+      for (const k of listed) if (existsSync(join(outDir, d, `${k}.png`))) copyFileSync(join(outDir, d, `${k}.png`), join(keep, d, `${k}.png`));
+    }
+    console.log(`  previous renders and height passes of ${listed.length} tiles kept in ${keep}`);
+  }
+  const todo = tiles.filter(([x, y]) => args.force || listed.length || !existsSync(join(outDir, "render", `${x}_${y}.png`)));
   console.log(`${areaName}: ${all.length} tiles, ${todo.length} to render`);
 
   const manifestPath = join(outDir, "manifest.json");

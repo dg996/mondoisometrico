@@ -154,6 +154,16 @@ export const LANDMARKS: Record<string, Landmark[]> = {
       paintRadiusM: 25, name: "Piramide Cestia", lat: 41.876456, lon: 12.480856, minPx: 0.14, groundMsl: 18,
       paintHint: "Pyramid of Cestius: a steep white marble pyramid (about 36 m) built into the Aurelian walls next to Porta San Paolo. Clean pointed pyramid, white stone.",
     },
+    {
+      // OSM node 2018208556 (historic=city_gate); Wikidata Q748516 41.8733,12.4971. Issue #10.
+      paintRadiusM: 30, name: "Porta Ardeatina", lat: 41.87324, lon: 12.4971, minPx: 0.18, groundMsl: 38,
+      paintHint: "Porta Ardeatina: a small postern of the Aurelian Walls, walled up since the early Middle Ages: a narrow travertine-framed opening, closed with brick, in a short stretch where the brick wall juts out like a small bastion; a stretch of ancient paving at its foot. Right beside it the modern arched openings in the wall carry Via Cristoforo Colombo through. The wall stays a brick wall, never a building.",
+    },
+    {
+      // Wikidata Q475012 41.8875,12.515 (no named OSM outline: the Aurelian wall line traces its curve). Issue #11.
+      paintRadiusM: 45, name: "Anfiteatro Castrense", lat: 41.8875, lon: 12.515, minPx: 0.18, groundMsl: 45,
+      paintHint: "Amphitheatrum Castrense: the curved stretch of the Aurelian Walls here is the surviving lowest order of a 3rd-century brick amphitheatre built into the walls: Roman brick, a row of walled-up arches framed by half-columns on its curved outer face, no upper storeys, no roof; inside the curve the garden of Santa Croce in Gerusalemme. Keep the curve exactly as rendered.",
+    },
     { name: "Piazza del Popolo", lat: 41.910748, lon: 12.476365, minPx: 0.1, groundMsl: 18 },
     { name: "Campo de' Fiori", lat: 41.895577, lon: 12.472159, minPx: 0.14, groundMsl: 23 },
   ],

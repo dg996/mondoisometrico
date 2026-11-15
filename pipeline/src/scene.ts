@@ -17,6 +17,7 @@ import { osmSolid, hasCompleteParts, type BuildingDetail, type SceneBuilding } f
 import { SEA_H } from "./heights.ts";
 import { DERIVED, RAW, readJson } from "./paths.ts";
 import { AURELIAN_WALLS, BIG_STATION_M2, insideRing, romanFallbackHeight, romanLook } from "./roma-style.ts";
+import { cityWall, crossing, isCityWall, thickLine, WallMatcher, wallPieces, WALL_STYLE, type WallSpec } from "./city-walls.ts";
 import type { CtrnUnit } from "./ctrn.ts";
 import polygonClipping from "polygon-clipping";
 
@@ -326,10 +327,29 @@ function unitsIn(ring: P2[], holes: P2[][]) {
 let ctrnBuildings = 0, ctrnVolumes = 0, ctrnHeights = 0;
 let osmCount = 0;
 const trees: Array<[number, number, number, number]> = [];
+/** building=city_wall outlines (Mura Aureliane on Viale di Porta Ardeatina): drawn as walls below, not palazzi */
+const wallOutlines: Array<{ ring: P2[]; spec: WallSpec }> = [];
+// city wall lines (walls.json, fetch.ts) and the named walls unnamed wall elements are matched against
+const enuLine = (coords: number[][]) => coords.map(([lon, lat]) => { const p = toEnu(lon, lat); return [p[0], p[1]] as P2; });
+const wallWays: Array<{ tags: Record<string, string>; line: P2[] }> = [];
+if (ROMA && existsSync(join(raw, "walls.json"))) {
+  for (const el of readJson(join(raw, "walls.json")).elements)
+    if (el.type === "way" && el.geometry?.length >= 2 && isCityWall(el.tags ?? {}) && !osmSolid(el.tags ?? {}))
+      wallWays.push({ tags: el.tags, line: enuLine(el.geometry.map((q: any) => [q.lon, q.lat])) });
+} else if (ROMA) console.warn(`  no walls.json: run npm run fetch -- ${name} (city walls are drawn from it)`);
+const walls = new WallMatcher([
+  ...wallWays.flatMap(({ tags, line }) => { const spec = cityWall(tags); return spec ? [{ line, spec }] : []; }),
+  ...(ROMA ? osm.elements : []).flatMap((el: any) => { const spec = osmSolid(el.tags ?? {}) ? cityWall(el.tags ?? {}) : null; return spec ? outerRings(el).map((c) => ({ line: enuLine(c), spec })) : []; }),
+]);
 for (const el of osm.elements) {
   const t = el.tags ?? {};
   if (el.type === "node" && t.natural === "tree") { const p = toEnu(el.lon, el.lat); trees.push([p[0], p[1], 3, 6]); continue; }
   if (!osmSolid(t) || (el.type === "way" && memberWays.has(el.id))) continue;
+  const wallSpec = ROMA && isCityWall(t) ? walls.match(t, outerRings(el).flatMap(enuLine)) : null;
+  if (wallSpec) {
+    for (const coords of outerRings(el)) { const ring = ringFromLonLat(coords, 1); if (ring) wallOutlines.push({ ring, spec: wallSpec }); }
+    continue;
+  }
   const isPart = !!t["building:part"] && t["building:part"] !== "no";
   // buildings + mapped fountain/monument footprints (never an entire tourism site)
   const isFountain = t.amenity === "fountain" || t.fountain === "yes";
@@ -465,6 +485,79 @@ for (const el of osm.elements) {
 console.log(`  osm buildings (outside municipal layer): ${osmCount}`);
 if (ROMA) console.log(`  ctrn: ${ctrnBuildings} buildings rebuilt from ${ctrnVolumes} surveyed volumes, ${ctrnHeights} more with surveyed height`);
 
+const groundOsm = readJson(join(raw, "ground.json"));
+
+// City walls (city-walls.ts, issues #10 #11). OSM lines are thickened to the wall, outlines kept as
+// drawn (a line tracing an outline is not doubled), everything cut into 10 m pieces that follow the
+// ground. A road crossing a line at street level (no tunnel/arch tag) keeps its opening.
+if (ROMA) {
+  const lines = wallWays.flatMap(({ tags, line }) => { const spec = walls.match(tags, line); return spec ? [{ line, spec }] : []; });
+  const edgeDist = ([x, y]: P2, r: P2[]) => {
+    let d = Infinity;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [ax, ay] = r[j], [bx, by] = r[i], dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy || 1e-9;
+      const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L));
+      d = Math.min(d, Math.hypot(x - ax - u * dx, y - ay - u * dy));
+    }
+    return d;
+  };
+  const onOutline = (p: P2) => wallOutlines.some(({ ring }) => inside(p, ring) || edgeDist(p, ring) < 1.5);
+  // street-level road openings through a wall line: carriageway segments on a 50 m grid. Footways are
+  // left out: the sidewalks along Corso d'Italia and the Piramide zigzag across the wall's line (20 false
+  // openings in roma-inner); real gates and arches are tunnel=building_passage ways and keep the wall.
+  const RC = 50, roadGrid = new Map<string, Array<{ a: P2; b: P2; w: number }>>();
+  for (const el of groundOsm.elements) {
+    const t = el.tags ?? {};
+    if (el.type !== "way" || !el.geometry || !t.highway || t.footway
+      || /^(footway|path|steps|cycleway|pedestrian|track|bridleway|corridor|elevator|platform|proposed|construction)$/.test(t.highway)) continue;
+    if ((t.tunnel && t.tunnel !== "no") || t.covered === "yes" || (parseFloat(t.layer) || 0) < 0) continue;
+    const w = Math.max(5, parseFloat(t.width) || (parseFloat(t.lanes) || 2) * 3.2 + 1.5);
+    const g: P2[] = el.geometry.map((q: any) => { const p = toEnu(q.lon, q.lat); return [p[0], p[1]] as P2; });
+    for (let j = 1; j < g.length; j++) {
+      const seg = { a: g[j - 1], b: g[j], w };
+      for (let gx = Math.floor(Math.min(seg.a[0], seg.b[0]) / RC); gx <= Math.floor(Math.max(seg.a[0], seg.b[0]) / RC); gx++)
+        for (let gy = Math.floor(Math.min(seg.a[1], seg.b[1]) / RC); gy <= Math.floor(Math.max(seg.a[1], seg.b[1]) / RC); gy++)
+          (roadGrid.get(`${gx}_${gy}`) ?? roadGrid.set(`${gx}_${gy}`, []).get(`${gx}_${gy}`)!).push(seg);
+    }
+  }
+  const groups = new Map<string, { spec: WallSpec; shapes: P2[][]; gaps: P2[][] }>();
+  const group = (spec: WallSpec) => { const k = JSON.stringify(spec); return groups.get(k) ?? groups.set(k, { spec, shapes: [], gaps: [] }).get(k)!; };
+  for (const { ring, spec } of wallOutlines) group(spec).shapes.push(ring);
+  let length = 0, traced = 0;
+  const openings: string[] = [];
+  for (const { line, spec } of lines) {
+    const g = group(spec);
+    for (let i = 1; i < line.length; i++) {
+      const a = line[i - 1], b = line[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (onOutline([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2])) { traced += L; continue; }
+      length += L;
+      g.shapes.push(...thickLine([a, b], spec.thickness));
+      const seen = new Set<object>();
+      for (let gx = Math.floor(Math.min(a[0], b[0]) / RC); gx <= Math.floor(Math.max(a[0], b[0]) / RC); gx++)
+        for (let gy = Math.floor(Math.min(a[1], b[1]) / RC); gy <= Math.floor(Math.max(a[1], b[1]) / RC); gy++)
+          for (const r of roadGrid.get(`${gx}_${gy}`) ?? []) {
+            if (seen.has(r)) continue;
+            seen.add(r);
+            const x = crossing(a, b, r.a, r.b);
+            if (!x) continue;
+            const n = Math.hypot(r.b[0] - r.a[0], r.b[1] - r.a[1]) || 1, ux = (r.b[0] - r.a[0]) / n, uy = (r.b[1] - r.a[1]) / n;
+            const hl = spec.thickness * 2 + 2, hw = r.w / 2;
+            g.gaps.push([[x[0] - ux * hl - uy * hw, x[1] - uy * hl + ux * hw], [x[0] - ux * hl + uy * hw, x[1] - uy * hl - ux * hw],
+              [x[0] + ux * hl + uy * hw, x[1] + uy * hl - ux * hw], [x[0] + ux * hl - uy * hw, x[1] + uy * hl + ux * hw]]);
+            openings.push(`${Math.round(x[0])},${Math.round(x[1])} (${r.w.toFixed(0)} m)`);
+          }
+    }
+  }
+  let pieces = 0;
+  for (const { spec, shapes, gaps } of groups.values())
+    for (const [outer, ...holes] of wallPieces(shapes, gaps)) {
+      buildings.push({ ring: outer, h: spec.height, s: WALL_STYLE, g: null, keepInPlaza: true,
+        detail: { part: false, minHeight: 0, holes, roofHeight: 0, wallColor: spec.wallColor, roofColor: spec.roofColor } });
+      pieces++;
+    }
+  console.log(`  city walls: ${Math.round(length)} m of wall lines + ${wallOutlines.length} outlines (${Math.round(traced)} m of line on an outline) -> ${pieces} pieces; ${openings.length} street openings${openings.length ? ` at ENU ${openings.join(", ")}` : ""}`);
+}
+
 // Clear clutter from monument plazas. Piazza Venezia and the Colosseum valley must stay open:
 // OSM stubs / kiosks / wrong outers otherwise extrude as apartment blocks and paint invents more.
 {
@@ -497,7 +590,7 @@ if (ROMA) console.log(`  ctrn: ${ctrnBuildings} buildings rebuilt from ${ctrnVol
 // motorway, trunk road or railway runs through for 20 m+ is not a building. Drop it; the road is drawn.
 {
   const lines: P2[] = [];
-  for (const el of readJson(join(raw, "ground.json")).elements) {
+  for (const el of groundOsm.elements) {
     const t = el.tags ?? {};
     if (el.type !== "way" || !el.geometry || !(/^(motorway|trunk)(_link)?$/.test(t.highway) || /^(rail|light_rail)$/.test(t.railway))) continue;
     const g: P2[] = el.geometry.map((q: any) => { const p = toEnu(q.lon, q.lat); return [p[0], p[1]] as P2; });

@@ -153,8 +153,9 @@ export interface TileObjects {
   t: Array<[number, number, number, number]>;      // x, y, radius, crown height
 }
 
-/** wall, roof colours per style (see scene.ts / roma-style.ts): bauhaus, residential, public, tower, shed,
- * modern, then Rome: palazzo storico, palazzina novecento, travertino. OSM / scene colours override. */
+/** wall, roof colours per style (see scene.ts / roma-style.ts / city-walls.ts): bauhaus, residential, public,
+ * tower, shed, modern, then Rome: palazzo storico, palazzina novecento, travertino, city wall (mura).
+ * OSM / scene colours override. */
 const PALETTE: Array<[number[], number[]]> = [
   [[0.97, 0.96, 0.93], [0.88, 0.87, 0.84]],
   [[0.94, 0.88, 0.76], [0.84, 0.82, 0.78]],
@@ -165,6 +166,7 @@ const PALETTE: Array<[number[], number[]]> = [
   [[0.84, 0.63, 0.34], [0.72, 0.38, 0.25]],
   [[0.91, 0.84, 0.71], [0.79, 0.74, 0.66]],
   [[0.87, 0.83, 0.74], [0.68, 0.40, 0.27]],
+  [[0.66, 0.40, 0.29], [0.56, 0.48, 0.38]],
 ];
 const SUN = new THREE.Vector3(-0.55, -0.35, 0.76).normalize();
 
@@ -245,6 +247,12 @@ const buildingMaterial = new THREE.ShaderMaterial({
           if (y < 1.2) c *= 0.85;
           if (y > 5.0 && y < vEave - 2.5 && col > 0.43 && col < 0.57 && fract(y / 7.0) > 0.25) c = mix(c, DARK, 0.75);
           if (y > vEave - 0.8) c = mix(c, STUCCO, 0.6);
+        } else if (k == 9) {     // city wall (Mura Aureliane): Roman brick courses, no openings, merlons on top
+          float y = vFacade.y;
+          c *= 0.94 + 0.06 * step(0.5, fract(y / 0.7));
+          if (y < 1.5) c *= 0.86;                                     // weathered foot
+          if (y > vEave - 1.2 && fract(x / 2.4) > 0.55) c *= 0.62;    // gaps between the merlons
+          else if (y > vEave - 1.5 && y < vEave - 1.2) c *= 0.8;      // wall-walk line
         }
         if (ground && k != 3 && k != 4 && k < 6) c *= 0.84;  // shops / pilotis shade
       }
