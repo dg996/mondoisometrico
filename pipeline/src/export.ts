@@ -113,8 +113,20 @@ async function readTile(layer: string, z: number, x: number, y: number): Promise
   if (existsSync(local)) return readFileSync(local);
   if (fetched.has(rel)) return fetched.get(rel)!;
   const v = state.layers[layer]?.hashes[`${z}/${x}_${y}`];
-  const r = await fetch(`${HOSTING.origin}/regions/${activeRegion()}/${rel}${v ? `?v=${v}` : ""}`);
-  if (!r.ok) throw new Error(`${rel}: not in the cache and ${r.status} from ${HOSTING.origin} (delete ${publishedFile()} to rebuild everything)`);
+  const url = `${HOSTING.origin}/regions/${activeRegion()}/${rel}${v ? `?v=${v}` : ""}`;
+  // r2.dev is rate-limited: one connect timeout used to abort a 40-minute export. Retry network
+  // failures and 429/5xx with backoff; a 404 still fails at once (the tile really is missing).
+  let r: Response | null = null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      r = await fetch(url);
+      if (r.ok || (r.status !== 429 && r.status < 500) || attempt >= 6) break;
+    } catch (e) {
+      if (attempt >= 6) throw e;
+    }
+    await new Promise((res) => setTimeout(res, 2000 * 2 ** (attempt - 1)));
+  }
+  if (!r!.ok) throw new Error(`${rel}: not in the cache and ${r!.status} from ${HOSTING.origin} (delete ${publishedFile()} to rebuild everything)`);
   const b = Buffer.from(await r.arrayBuffer());
   fetched.set(rel, b);
   return b;
