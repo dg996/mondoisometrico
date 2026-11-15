@@ -1,66 +1,60 @@
 # Mondo Isometrico
 
-**Roma come non l'hai mai vista: una mappa isometrica dipinta, viva, da esplorare dall'alto fino ai sampietrini.**
+Mappa isometrica di Roma costruita da dati aperti e dipinta con l'AI.
 
-### → [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
+Sito: [mondoisometrico.domenicogagliardi.com](https://mondoisometrico.domenicogagliardi.com)
 
 ![Il centro storico di Roma dall'alto: il Tevere, Castel Sant'Angelo, il Pantheon, l'Altare della Patria, il Colosseo e il Circo Massimo](docs/images/roma.jpg)
 
-Mondo Isometrico è una mappa di Roma in prospettiva isometrica, come una grande illustrazione da
-sfogliare. Ogni palazzo, strada, albero e monumento è al suo posto vero, ricostruito da dati aperti
-(OpenStreetMap, la Carta Tecnica della Regione Lazio, i rilievi del terreno di Copernicus) e poi
-dipinto, tessera dopo tessera, con l'intelligenza artificiale.
+Edifici, strade, alberi e monumenti sono ricostruiti da OpenStreetMap, dalla Carta Tecnica della
+Regione Lazio e dal modello del terreno di Copernicus. Le tessere della mappa sono poi dipinte con
+un modello di AI. Si può zoomare dalla città intera fino ai singoli edifici.
 
-Si parte dalla città intera e si scende fino al dettaglio: le arcate del Colosseo, le statue
-dell'Altare della Patria, le strisce pedonali, le singole auto.
+## Cosa si muove sulla mappa
 
-## Una città che si muove
+![Piazza Venezia: auto e bus ATAC attorno all'Altare della Patria](docs/images/piazza-venezia.jpg)
 
-![Piazza Venezia: auto e bus ATAC che girano attorno all'Altare della Patria](docs/images/piazza-venezia.jpg)
+- Le auto circolano sulla rete stradale di OpenStreetMap, rispettano i sensi unici e si fermano agli
+  incroci e alle strisce pedonali.
+- I bus ATAC seguono i percorsi delle linee reali e mostrano il numero di linea; i tram corrono sui
+  binari. Di notte girano le linee notturne.
+- La luce segue l'ora e la posizione del sole a Roma. Se a Roma piove, piove anche sulla mappa,
+  con l'intensità registrata da Open-Meteo.
+- Nelle zone non ancora dipinte ci sono dei cantieri: la mappa si allarga a ogni aggiornamento.
 
-- **Traffico sulle strade vere.** Auto, taxi e furgoni girano sulla rete stradale di OpenStreetMap,
-  rispettano i sensi unici, si fermano agli incroci e prima delle strisce pedonali.
-- **Bus e tram delle linee reali.** I bus ATAC seguono i percorsi veri, con il numero di linea sul
-  tetto, e i tram corrono sui loro binari; di notte girano le linee notturne.
-- **L'ora e il meteo di Roma, adesso.** La luce segue il sole sopra Roma minuto per minuto, dal mattino
-  all'ora dorata alla notte; se a Roma piove, sulla mappa piove, con l'intensità vera.
-- **Cantieri al confine.** Dove la pittura non è ancora arrivata, piccole squadre di pittori stendono
-  la vernice tra coni e transenne: la mappa cresce a ogni aggiornamento.
-
-## I monumenti, come sono davvero
+## Monumenti
 
 | | |
 |---|---|
 | ![Il Colosseo](docs/images/colosseo.jpg) | ![Castel Sant'Angelo e il Tevere](docs/images/castel-sant-angelo.jpg) |
-| **Colosseo** | **Castel Sant'Angelo** |
-| ![Il Campidoglio di Michelangelo con la Cordonata e la scalinata dell'Aracoeli](docs/images/campidoglio.jpg) | ![La stazione Termini](docs/images/termini.jpg) |
-| **Campidoglio**, con la Cordonata e la piazza di Michelangelo | **Termini** |
+| Colosseo | Castel Sant'Angelo |
+| ![Il Campidoglio con la Cordonata e la scalinata dell'Aracoeli](docs/images/campidoglio.jpg) | ![La stazione Termini](docs/images/termini.jpg) |
+| Campidoglio | Termini |
 
-Ogni monumento è controllato contro OpenStreetMap e Wikidata: scalinate della loro larghezza vera,
-piazze con il loro disegno, nessun edificio inventato o spostato.
+Posizione e forma dei monumenti sono confrontate con OpenStreetMap e Wikidata.
 
-## Di giorno, di sera, sotto la pioggia
+## Sera e pioggia
 
 | | |
 |---|---|
 | ![Il centro storico la sera](docs/images/sera.jpg) | ![Piazza Venezia sotto la pioggia](docs/images/pioggia.jpg) |
-| **La sera** | **Quando piove a Roma** |
+| Sera | Pioggia |
 
-## Anche in tasca
+## Da telefono
 
 <img src="docs/images/telefono.jpg" alt="La mappa su telefono, sul Colosseo" width="300">
 
-Funziona sul telefono come sul computer: si trascina, si allarga con due dita, si condivide la vista
-esatta con un tocco. E se qualcosa non torna o hai un'idea, c'è il pulsante **Segnala un problema o
-un'idea** direttamente sulla mappa.
+La mappa funziona anche da telefono: si sposta trascinando, si zooma con due dita e si può
+condividere il link alla vista corrente. Per segnalare un problema o proporre un'idea c'è il
+pulsante "Segnala un problema o un'idea" sulla mappa.
 
 ---
 
-**Fonti dei dati:** © OpenStreetMap contributors (ODbL), Regione Lazio CTRN (CC BY 4.0), ESA WorldCover
+Fonti dei dati: © OpenStreetMap contributors (ODbL), Regione Lazio CTRN (CC BY 4.0), ESA WorldCover
 2021 (CC BY 4.0), Copernicus DEM, Roma Servizi per la Mobilità (CC BY-SA), Open-Meteo (CC BY 4.0).
-Dettagli e obblighi di licenza in [ATTRIBUTION.md](ATTRIBUTION.md). Mappa dipinta con l'AI.
+Dettagli e obblighi di licenza in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Codice: [MIT](LICENSE) · Immagini della mappa: CC BY 4.0 · Note tecniche: [docs/sviluppo.md](docs/sviluppo.md)
+Codice: [MIT](LICENSE). Immagini della mappa: CC BY 4.0. Note tecniche: [docs/sviluppo.md](docs/sviluppo.md).
 
-Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun ·
-Realizzato da [Domenico Gagliardi](https://domenicogagliardi.com)
+Basato su [Isometric World](https://github.com/krasun/isometricworld) di Dmytro Krasun.
+Realizzato da [Domenico Gagliardi](https://domenicogagliardi.com).
